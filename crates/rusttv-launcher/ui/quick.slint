@@ -25,6 +25,8 @@ export struct SettingsRow {
     // A slider: a level bar after the detail, filled to `level` (0..1).
     slider: bool,
     level: float,
+    // The title of the rows below (focus passes over it).
+    heading: bool,
 }
 
 // A row in the long-press menu's style (home.slint `MenuRow`), with a level
@@ -39,6 +41,7 @@ export component ControlRow inherits Rectangle {
     in property <bool> dim;
     in property <bool> slider;
     in property <float> level;
+    in property <bool> heading;
     height: (detail == "" && !slider ? 64 : 96) * u;
     border-radius: 10 * u;
     background: selected ? Colours.text : Colours.text.with-alpha(0);
@@ -63,11 +66,11 @@ export component ControlRow inherits Rectangle {
         width: parent.width - 68 * u;
         height: detail == "" && !slider ? parent.height : 34 * u;
         text: root.text;
-        font-size: 27 * u;
-        font-weight: 500;
-        color: selected ? Colours.bg : dim ? Colours.text-dim : Colours.text;
+        font-size: (heading ? 22 : 27) * u;
+        font-weight: heading ? 700 : 500;
+        color: selected ? Colours.bg : heading ? Colours.accent : dim ? Colours.text-dim : Colours.text;
         horizontal-alignment: root.start;
-        vertical-alignment: center;
+        vertical-alignment: heading ? TextVerticalAlignment.bottom : TextVerticalAlignment.center;
         overflow: elide;
         animate color { duration: 120ms; }
     }
@@ -322,6 +325,7 @@ export component QuickPanel inherits Rectangle {
             dim: data.dim;
             slider: data.slider;
             level: data.level;
+            heading: data.heading;
             selected: i == focused-row;
             visible: i >= first-row;
         }

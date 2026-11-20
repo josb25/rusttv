@@ -110,6 +110,50 @@ pub enum ControlKind {
     /// Left and Right move something one step either way, with no value
     /// to show (a projector's lens focus); sent as [`Value::Step`].
     Nudge,
+    /// The title of the rows below it ("Saved networks"); focus passes
+    /// over it.
+    Heading,
+}
+
+impl Control {
+    /// Whether focus can rest on it (every row but a heading).
+    pub fn selectable(&self) -> bool {
+        !matches!(self.kind, ControlKind::Heading)
+    }
+}
+
+/// The selectable row after `row` (`down`) or before it, else `row`.
+pub(crate) fn step_row(controls: &[Control], row: usize, down: bool) -> usize {
+    let found = if down {
+        controls
+            .iter()
+            .enumerate()
+            .skip(row + 1)
+            .find(|(_, control)| control.selectable())
+    } else {
+        controls
+            .iter()
+            .enumerate()
+            .take(row)
+            .rev()
+            .find(|(_, control)| control.selectable())
+    };
+    found.map_or(row, |(index, _)| index)
+}
+
+/// Where focus rests near `row`: `row` itself if selectable, else the
+/// next selectable row below, else above; `None` without one.
+pub(crate) fn settle_row(controls: &[Control], row: usize) -> Option<usize> {
+    let row = row.min(controls.len().checked_sub(1)?);
+    if controls.get(row).is_some_and(Control::selectable) {
+        return Some(row);
+    }
+    let below = step_row(controls, row, true);
+    if below != row {
+        return Some(below);
+    }
+    let above = step_row(controls, row, false);
+    (above != row).then_some(above)
 }
 
 /// A control's new value, for [`DeviceSettings::set`].
@@ -326,14 +370,15 @@ impl PanelPage {
     /// Shows freshly read controls, keeping focus on the same row where it
     /// still exists.
     pub fn set_tab(&mut self, tab: Option<Tab>) {
-        let rows = tab.as_ref().map_or(0, |tab| tab.controls.len());
-        self.row = self.row.min(rows.saturating_sub(1));
+        self.row = tab
+            .as_ref()
+            .and_then(|tab| settle_row(&tab.controls, self.row))
+            .unwrap_or(0);
         self.tab = tab;
     }
 
     /// Applies one key; returns what ui.rs must do.
     pub fn handle(&mut self, input: Input) -> Option<PanelAction> {
-        let rows = self.tab.as_ref().map_or(0, |tab| tab.controls.len());
         if let Some(control) = self
             .tab
             .as_mut()
@@ -350,9 +395,10 @@ impl PanelPage {
                 Adjust::Ignored => {}
             }
         }
+        let controls = self.tab.as_ref().map_or(&[][..], |tab| &tab.controls[..]);
         match input {
-            Input::Up => self.row = self.row.saturating_sub(1),
-            Input::Down => self.row = (self.row + 1).min(rows.saturating_sub(1)),
+            Input::Up => self.row = step_row(controls, self.row, false),
+            Input::Down => self.row = step_row(controls, self.row, true),
             Input::Back => return Some(PanelAction::Close),
             _ => {}
         }
@@ -361,8 +407,12 @@ impl PanelPage {
 
     /// A mouse click on `row`: focuses it and presses OK there.
     pub fn click(&mut self, row: usize) -> Option<PanelAction> {
-        let rows = self.tab.as_ref().map_or(0, |tab| tab.controls.len());
-        if row >= rows {
+        let selectable = self
+            .tab
+            .as_ref()
+            .and_then(|tab| tab.controls.get(row))
+            .is_some_and(Control::selectable);
+        if !selectable {
             return None;
         }
         self.row = row;
@@ -579,6 +629,39 @@ impl DeviceSettings for FakeDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_passes_over_headings() {
+        let rows = [
+            control("h1", "Connected", "", ControlKind::Heading),
+            control("a", "Home", "", ControlKind::Action),
+            control("h2", "Available networks", "", ControlKind::Heading),
+            control("h3", "Saved networks", "", ControlKind::Heading),
+            control("b", "Office", "", ControlKind::Action),
+            control("h4", "End", "", ControlKind::Heading),
+        ];
+        assert_eq!(step_row(&rows, 1, true), 4);
+        assert_eq!(step_row(&rows, 4, false), 1);
+        assert_eq!(step_row(&rows, 4, true), 4, "nothing below");
+        assert_eq!(step_row(&rows, 1, false), 1, "nothing above");
+        assert_eq!(settle_row(&rows, 0), Some(1));
+        assert_eq!(settle_row(&rows, 2), Some(4));
+        assert_eq!(settle_row(&rows, 9), Some(4));
+        assert_eq!(settle_row(&rows[..1], 0), None);
+        assert_eq!(settle_row(&[], 0), None);
+
+        let mut page = PanelPage::new(QuickPanel::Network, false);
+        page.set_tab(Some(Tab {
+            id: "network".into(),
+            title: "Network".into(),
+            controls: rows.to_vec(),
+        }));
+        assert_eq!(page.row(), 1);
+        page.handle(Input::Down);
+        assert_eq!(page.row(), 4);
+        assert_eq!(page.click(2), None, "a heading takes no click");
+        assert_eq!(page.row(), 4);
+    }
 
     fn slider(value: i32) -> Control {
         control(

@@ -106,6 +106,7 @@ pub(super) fn control_row(window: &HomeWindow, control: &Control) -> SettingsRow
             row.detail = given(options.get(*selected).cloned().unwrap_or_default());
         }
         ControlKind::Nudge => row.detail = given("‹  ›".to_owned()),
+        ControlKind::Heading => row.heading = true,
         ControlKind::Action | ControlKind::Text { .. } | ControlKind::Info => {}
     }
     row
