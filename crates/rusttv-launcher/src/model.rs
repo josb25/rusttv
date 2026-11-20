@@ -236,6 +236,8 @@ pub enum QuickAction {
     Audio,
     /// The Network quick panel.
     Network,
+    /// Opens the device's video input (HDMI), shown by an app.
+    Input,
     /// Opens KDE Connect.
     KdeConnect,
     /// The Settings page.
@@ -246,11 +248,12 @@ pub enum QuickAction {
 
 impl QuickAction {
     /// Every entry, in menu order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Search,
         Self::Modify,
         Self::Audio,
         Self::Network,
+        Self::Input,
         Self::KdeConnect,
         Self::Settings,
         Self::Power,

@@ -69,6 +69,8 @@ fn quick_code(action: QuickAction) -> i32 {
         QuickAction::KdeConnect => 4,
         QuickAction::Settings => 5,
         QuickAction::Power => 6,
+        // After Network in the menu, so above 3 (quick.slint `start`).
+        QuickAction::Input => 7,
     }
 }
 

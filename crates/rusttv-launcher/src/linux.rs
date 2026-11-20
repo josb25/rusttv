@@ -47,6 +47,9 @@ pub enum AppEvent {
     Started(String),
     /// The app's process ended.
     Exited(String),
+    /// A source started sending a picture to the device's video input
+    /// (`device_file`'s `[[input]]`); arrives on the input's watcher thread.
+    InputSignal,
 }
 
 /// Receives [`AppEvent`]s; `Exited` arrives on a waiter thread.
@@ -76,6 +79,66 @@ const SVG_PIXELS: f32 = 256.0;
 
 /// KDE Connect's desktop entry, opened by its entry in the top-right menu.
 const KDE_CONNECT: &str = "org.kde.kdeconnect.app.desktop";
+
+/// How long the video input's watcher waits before starting its command
+/// again after it ended.
+const WATCH_RESTART: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Runs the video input's `watch` command on a thread of its own, again
+/// whenever it ends, and sends [`AppEvent::InputSignal`] when its lines
+/// say a picture started arriving.
+fn watch_input(command: Vec<String>, events: AppEvents) {
+    let started = std::thread::Builder::new()
+        .name("rusttv-input-watch".into())
+        .spawn(move || {
+            use std::io::BufRead as _;
+            let Some((program, args)) = command.split_first() else {
+                return;
+            };
+            // Whether a picture arrived when last heard; a picture that is
+            // already there at start doesn't switch.
+            let mut signal: Option<bool> = None;
+            loop {
+                let child = std::process::Command::new(program)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn();
+                match child {
+                    Ok(mut child) => {
+                        if let Some(out) = child.stdout.take() {
+                            for line in std::io::BufReader::new(out).lines() {
+                                let Ok(line) = line else { break };
+                                log::info!("video input: {line}");
+                                let (now, switch) = input_change(signal, &line);
+                                signal = Some(now);
+                                if switch {
+                                    events(AppEvent::InputSignal);
+                                }
+                            }
+                        }
+                        let status = child.wait();
+                        log::warn!("{program} ended ({status:?}); again in {WATCH_RESTART:?}");
+                    }
+                    Err(error) => {
+                        log::warn!("{program} failed: {error}; again in {WATCH_RESTART:?}")
+                    }
+                }
+                std::thread::sleep(WATCH_RESTART);
+            }
+        });
+    if let Err(error) = started {
+        log::warn!("no thread to watch the video input: {error}");
+    }
+}
+
+/// A line of the video input's watcher after `before` (whether a picture
+/// arrived when last heard, `None` at start): whether one arrives now,
+/// and whether to switch to it (only when it newly arrives).
+fn input_change(before: Option<bool>, line: &str) -> (bool, bool) {
+    let now = device_file::has_signal(line);
+    (now, now && before == Some(false))
+}
 
 /// Where packages put the launcher's licence notices.
 const NOTICES: &str = "/usr/share/doc/rusttv-launcher/NOTICES";
@@ -194,8 +257,20 @@ impl LinuxPlatform {
     /// the home screen.
     #[must_use]
     pub fn with_events(mut self, events: AppEvents) -> Self {
+        if let Some(input) = self.device.input()
+            && !input.watch.is_empty()
+        {
+            watch_input(input.watch, events.clone());
+        }
         self.events = Some(events);
         self
+    }
+
+    /// The desktop file ID of the app that shows the video input, if the
+    /// device has one and the app is installed.
+    fn input_app(&self) -> Option<String> {
+        let input = self.device.input()?;
+        device::has_desktop_entry(&self.data_dirs, &input.app).then_some(input.app)
     }
 
     /// Makes app `id`, running but not started by this launcher, one of its
@@ -279,6 +354,7 @@ impl LinuxPlatform {
     fn scan(&self) -> HashMap<String, DesktopEntry> {
         let mut found = HashMap::new();
         let mut taken = HashSet::new();
+        let input = self.device.input().map(|input| input.app);
         for dir in self.application_dirs() {
             let mut files = Vec::new();
             collect_desktop_files(&dir, &dir, &mut files);
@@ -289,8 +365,10 @@ impl LinuxPlatform {
                 let Ok(text) = fs::read_to_string(&path) else {
                     continue;
                 };
+                // The video input's app is opened from the top-right menu,
+                // so it may hide from menus (`NoDisplay`).
                 if let Some(entry) = DesktopEntry::parse(&text, &path, self.language.as_deref())
-                    && entry.is_visible(&self.desktops)
+                    && (entry.is_visible(&self.desktops) || input.as_deref() == Some(id.as_str()))
                 {
                     found.insert(id, entry);
                 }
@@ -328,8 +406,11 @@ impl Platform for LinuxPlatform {
     fn list_apps(&self) -> Result<Vec<AppEntry>, PlatformError> {
         *self.seen.borrow_mut() = self.stamps();
         let entries = self.scan();
+        // The video input has its entry in the top-right menu, no tile.
+        let input = self.device.input().map(|input| input.app);
         let apps = entries
             .iter()
+            .filter(|(id, _)| input.as_deref() != Some(id.as_str()))
             .map(|(id, entry)| AppEntry {
                 app: App {
                     id: id.clone(),
@@ -510,11 +591,23 @@ impl Platform for LinuxPlatform {
         if device::has_desktop_entry(&self.data_dirs, KDE_CONNECT) {
             actions.push(QuickAction::KdeConnect);
         }
+        if self.input_app().is_some() {
+            actions.push(QuickAction::Input);
+        }
         actions
     }
 
     fn quick_action_app(&self, action: QuickAction) -> Option<String> {
-        (action == QuickAction::KdeConnect).then(|| KDE_CONNECT.to_owned())
+        match action {
+            QuickAction::KdeConnect => Some(KDE_CONNECT.to_owned()),
+            QuickAction::Input => self.input_app(),
+            _ => None,
+        }
+    }
+
+    fn input_label(&self) -> Option<String> {
+        self.input_app()?;
+        self.device.input().map(|input| input.label)
     }
 
     fn device_settings(&self) -> Option<Arc<dyn DeviceSettings>> {
@@ -1162,6 +1255,23 @@ mod tests {
         assert_eq!(again.percent.len(), 1);
         assert_eq!(again.percent.get("org.kde.dolphin.desktop"), Some(&150));
         fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
+    fn only_a_newly_arriving_picture_switches() {
+        // Already there at start: no switch.
+        assert_eq!(input_change(None, "signal 1920x1080@60"), (true, false));
+        assert_eq!(input_change(None, "no-signal"), (false, false));
+        assert_eq!(
+            input_change(Some(false), "signal 1920x1080@60"),
+            (true, true)
+        );
+        assert_eq!(
+            input_change(Some(true), "signal 1280x720@60"),
+            (true, false)
+        );
+        assert_eq!(input_change(Some(true), "no-signal"), (false, false));
+        assert_eq!(input_change(Some(false), "absent"), (false, false));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 mod net;
 
-use super::device_file::{self, DeviceControls, SideRow};
+use super::device_file::{self, DeviceControls, Input, SideRow};
 use super::program_exists;
 use crate::device::{
     Control, ControlKind, DeviceSettings, Link, QuickPanel, Tab, Value, Volume, VolumeChange,
@@ -112,6 +112,11 @@ impl LinuxDevice {
     /// test pattern while it moves.
     pub(super) fn shows_pattern(&self, tab: &str, control: &str) -> bool {
         self.controls.pattern(tab, control)
+    }
+
+    /// The device's video input, from its device files.
+    pub(super) fn input(&self) -> Option<Input> {
+        self.controls.input()
     }
 
     /// The device-file controls of the side menu over apps.

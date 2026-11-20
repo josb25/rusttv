@@ -255,6 +255,27 @@ impl Lifecycle {
         });
     }
 
+    /// A source started sending a picture to the device's video input
+    /// (Linux: its device file's `watch` command): the input comes to the
+    /// front, over Home or the app in front, as its top-right menu entry
+    /// would bring it.
+    #[cfg_attr(
+        not(feature = "linux"),
+        allow(dead_code, reason = "called by the Linux binary")
+    )]
+    pub fn input_signal(&self) {
+        self.deliver(|controller| {
+            if controller
+                .home
+                .quick_actions()
+                .contains(&crate::model::QuickAction::Input)
+            {
+                log::info!("a picture arrives at the video input; showing it");
+                controller.open_quick(crate::model::QuickAction::Input);
+            }
+        });
+    }
+
     /// Home held (Linux: `--app-menu`): the app overlay over the app in
     /// front (its size, the volume, closing it), or closes it when it is
     /// open. Over the home screen, or where there is no overlay, just Home.
@@ -933,6 +954,7 @@ impl Controller {
         window.set_quick_actions(ModelRc::from(quick_codes.clone()));
         let link_codes = Rc::new(VecModel::default());
         window.set_network_icons(ModelRc::from(link_codes.clone()));
+        window.set_input_label(platform.input_label().unwrap_or_default().into());
         window.set_version(env!("CARGO_PKG_VERSION").into());
         window.set_update_status(update_line(window, &UpdateStatus::Idle));
 
@@ -2898,6 +2920,10 @@ mod tests {
 
         fn quick_action_app(&self, action: crate::model::QuickAction) -> Option<String> {
             self.platform.borrow().quick_action_app(action)
+        }
+
+        fn input_label(&self) -> Option<String> {
+            self.platform.borrow().input_label()
         }
 
         fn device_settings(&self) -> Option<std::sync::Arc<dyn crate::device::DeviceSettings>> {

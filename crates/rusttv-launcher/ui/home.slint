@@ -765,6 +765,8 @@ export component HomeWindow inherits Window {
     // codes, the focused one (-1: focus is on the tiles).
     in property <[int]> quick-actions;
     in property <int> quick-selected: -1;
+    // The name of the device's video input entry (QuickAction::Input).
+    in property <string> input-label;
     // The open quick panel (mode quick): its title, status line, rows, the
     // focused row and the first row shown.
     in property <string> quick-title;
@@ -936,6 +938,7 @@ export component HomeWindow inherits Window {
         actions: quick-actions;
         selected: quick-selected;
         links: network-icons;
+        input-label: root.input-label;
         opacity: shelf ? 1 : 0;
         visible: self.opacity > 0;
         animate opacity { duration: 250ms; }

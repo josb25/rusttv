@@ -38,7 +38,12 @@ impl crate::model::QuickAction {
         match self {
             Self::Audio => Some(QuickPanel::Audio),
             Self::Power => Some(QuickPanel::Power),
-            Self::Network | Self::Search | Self::Modify | Self::KdeConnect | Self::Settings => None,
+            Self::Network
+            | Self::Search
+            | Self::Modify
+            | Self::Input
+            | Self::KdeConnect
+            | Self::Settings => None,
         }
     }
 }

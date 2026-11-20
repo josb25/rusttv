@@ -179,8 +179,14 @@ pub trait Platform {
     }
 
     /// The app (as [`Platform::list_apps`] names it) that a quick action
-    /// opens: Search, KDE Connect.
+    /// opens: Search, KDE Connect, the video input.
     fn quick_action_app(&self, _action: QuickAction) -> Option<String> {
+        None
+    }
+
+    /// The name of the device's video input in the top-right menu
+    /// ([`QuickAction::Input`], e.g. "HDMI"), in the UI's language.
+    fn input_label(&self) -> Option<String> {
         None
     }
 

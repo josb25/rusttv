@@ -133,6 +133,7 @@ fn deliver(signal: Signal) {
                     // focus (the launcher then pauses itself).
                     Signal::App(AppEvent::Started(_)) => {}
                     Signal::App(AppEvent::Exited(id)) => lifecycle.app_ended(id),
+                    Signal::App(AppEvent::InputSignal) => lifecycle.input_signal(),
                     // Like Android's Home: leave every page, then come back.
                     Signal::Home => {
                         lifecycle.paused();

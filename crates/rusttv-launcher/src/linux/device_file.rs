@@ -28,8 +28,26 @@
 //! right = ["hy320f-focus", "up"]
 //! ```
 //!
+//! A device with a video input (HDMI) names it, and the launcher puts it
+//! in the top-right menu over Home and switches to it by itself when a
+//! source starts sending a picture:
+//!
+//! ```toml
+//! [[input]]
+//! id = "hdmi"
+//! label = "HDMI"
+//! # The desktop entry that shows the input (it needs no tile on Home;
+//! # `NoDisplay=true` is fine).
+//! app = "hy320f-hdmi.desktop"
+//! # Runs while the launcher does: prints a line whenever the input
+//! # changes, "signal ..." while a source sends a picture, anything else
+//! # while none does. A new "signal" opens the input.
+//! watch = ["hy320f-hdmi", "watch"]
+//! ```
+//!
 //! The files are root-owned: they name commands. Files are read in name
-//! order; a tab id already taken by an earlier file is skipped.
+//! order; a tab id already taken by an earlier file is skipped, and only
+//! the first input counts.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -45,6 +63,38 @@ pub const DIR: &str = "/etc/rusttv/device.d";
 struct File {
     #[serde(default)]
     tab: Vec<FileTab>,
+    #[serde(default)]
+    input: Vec<FileInput>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileInput {
+    id: String,
+    label: String,
+    #[serde(default)]
+    labels: HashMap<String, String>,
+    app: String,
+    #[serde(default)]
+    watch: Vec<String>,
+}
+
+/// A video input of the device (HDMI), shown by its own app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Input {
+    pub id: String,
+    /// In the UI's language.
+    pub label: String,
+    /// The desktop file ID of the app that shows it.
+    pub app: String,
+    /// The command that reports its signal (empty: never switched to by
+    /// itself).
+    pub watch: Vec<String>,
+}
+
+/// Whether a line of an input's `watch` command says a picture arrives.
+pub fn has_signal(line: &str) -> bool {
+    line.split_whitespace().next() == Some("signal")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -103,6 +153,7 @@ pub struct SideRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeviceControls {
     tabs: Vec<FileTab>,
+    input: Option<FileInput>,
     /// The UI's language (`LANG` style, e.g. `de_DE.UTF-8`).
     language: Option<String>,
 }
@@ -123,6 +174,7 @@ impl DeviceControls {
         paths.sort();
         let mut controls = Self {
             tabs: Vec::new(),
+            input: None,
             language,
         };
         for path in paths {
@@ -130,21 +182,38 @@ impl DeviceControls {
                 .map_err(|error| error.to_string())
                 .and_then(|text| parse(&text));
             match parsed {
-                Ok(tabs) => controls.add(tabs),
+                Ok(file) => controls.add(file),
                 Err(error) => log::warn!("{}: {error}", path.display()),
             }
         }
         controls
     }
 
-    fn add(&mut self, tabs: Vec<FileTab>) {
-        for tab in tabs {
+    fn add(&mut self, file: File) {
+        for input in file.input {
+            if let Some(known) = &self.input {
+                log::warn!("input {} skipped; {} came first", input.id, known.id);
+                continue;
+            }
+            self.input = Some(input);
+        }
+        for tab in file.tab {
             if self.tabs.iter().any(|known| known.id == tab.id) {
                 log::warn!("device tab {} is described twice; the first counts", tab.id);
                 continue;
             }
             self.tabs.push(tab);
         }
+    }
+
+    /// The device's video input, if a device file names one.
+    pub fn input(&self) -> Option<Input> {
+        self.input.as_ref().map(|input| Input {
+            id: input.id.clone(),
+            label: self.pick(&input.label, &input.labels),
+            app: input.app.clone(),
+            watch: input.watch.clone(),
+        })
     }
 
     /// The Settings tabs, in the UI's language.
@@ -230,9 +299,9 @@ impl DeviceControls {
     }
 }
 
-/// A device file's tabs; every control needs ids, a label and both
-/// commands.
-fn parse(text: &str) -> Result<Vec<FileTab>, String> {
+/// A device file; every control needs ids, a label and both commands,
+/// every input an id, a label and an app.
+fn parse(text: &str) -> Result<File, String> {
     let file: File = toml::from_str(text).map_err(|error| error.to_string())?;
     for tab in &file.tab {
         if tab.id.is_empty() || tab.title.is_empty() {
@@ -253,7 +322,12 @@ fn parse(text: &str) -> Result<Vec<FileTab>, String> {
             }
         }
     }
-    Ok(file.tab)
+    for input in &file.input {
+        if input.id.is_empty() || input.label.is_empty() || input.app.is_empty() {
+            return Err("an input needs an id, a label and an app".into());
+        }
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -288,6 +362,7 @@ mod tests {
     fn controls(language: Option<&str>) -> DeviceControls {
         let mut controls = DeviceControls {
             tabs: Vec::new(),
+            input: None,
             language: language.map(str::to_owned),
         };
         controls.add(parse(FOCUS).unwrap());
@@ -354,7 +429,17 @@ mod tests {
             right = ["b"]
         "#;
         assert!(parse(no_command).is_err());
-        assert!(parse("").unwrap().is_empty());
+        assert_eq!(parse("").unwrap(), File::default());
+        assert!(
+            parse(
+                "[[input]]
+id = \"hdmi\"
+label = \"HDMI\"
+"
+            )
+            .is_err(),
+            "no app"
+        );
     }
 
     #[test]
@@ -368,5 +453,44 @@ mod tests {
     fn a_missing_directory_has_no_controls() {
         let controls = DeviceControls::load(Path::new("/nonexistent/rusttv"), None);
         assert!(controls.tabs().is_empty());
+        assert_eq!(controls.input(), None);
+    }
+
+    const HDMI: &str = r#"
+        [[input]]
+        id = "hdmi"
+        label = "HDMI"
+        labels = { de = "HDMI-Eingang" }
+        app = "hy320f-hdmi.desktop"
+        watch = ["hy320f-hdmi", "watch"]
+    "#;
+
+    #[test]
+    fn the_first_input_counts() {
+        let mut controls = controls(Some("de_DE.UTF-8"));
+        assert_eq!(controls.input(), None);
+        controls.add(parse(HDMI).unwrap());
+        controls.add(parse(&HDMI.replace("\"hdmi\"", "\"hdmi2\"")).unwrap());
+        assert_eq!(
+            controls.input(),
+            Some(Input {
+                id: "hdmi".into(),
+                label: "HDMI-Eingang".into(),
+                app: "hy320f-hdmi.desktop".into(),
+                watch: vec!["hy320f-hdmi".into(), "watch".into()],
+            })
+        );
+        // Inputs and tabs in one file.
+        let both = parse(&format!("{HDMI}{FOCUS}")).unwrap();
+        assert_eq!((both.tab.len(), both.input.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_signal_line_starts_with_signal() {
+        assert!(has_signal("signal 1920x1080@60"));
+        assert!(has_signal("signal"));
+        assert!(!has_signal("no-signal"));
+        assert!(!has_signal("absent"));
+        assert!(!has_signal(""));
     }
 }
