@@ -2,7 +2,8 @@
 //! tools, each only where it is installed: `wpctl` (PipeWire/WirePlumber)
 //! for audio, `nmcli` (NetworkManager) for networks, `bluetoothctl` for
 //! Bluetooth and `systemctl` to restart or power off. Facts for About come
-//! from `/etc/os-release`, `/proc` and `/sys`.
+//! from `/etc/os-release`, `/proc` and `/sys`. A device's own controls (a
+//! projector's lens focus) come from its device files (`device_file`).
 //!
 //! Every method blocks on a tool (at most [`TOOL_TIMEOUT`]); the launcher
 //! calls them on worker threads only.
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 
 mod net;
 
+use super::device_file::{self, DeviceControls, SideRow};
 use super::program_exists;
 use crate::device::{
     Control, ControlKind, DeviceSettings, Link, QuickPanel, Tab, Value, Volume, VolumeChange,
@@ -83,6 +85,8 @@ pub struct LinuxDevice {
     other_os: Option<OtherOs>,
     /// Whether a Bluetooth search ran: Devices then lists what it found.
     scanned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The device's own controls, from its device files.
+    controls: std::sync::Arc<DeviceControls>,
 }
 
 impl LinuxDevice {
@@ -97,7 +101,22 @@ impl LinuxDevice {
                 .ok()
                 .and_then(|text| parse_other_os(&text)),
             scanned: std::sync::Arc::default(),
+            controls: std::sync::Arc::new(DeviceControls::load(
+                Path::new(device_file::DIR),
+                super::ui_language(),
+            )),
         }
+    }
+
+    /// Whether the device-file control `control` of tab `tab` shows the
+    /// test pattern while it moves.
+    pub(super) fn shows_pattern(&self, tab: &str, control: &str) -> bool {
+        self.controls.pattern(tab, control)
+    }
+
+    /// The device-file controls of the side menu over apps.
+    pub(super) fn side_menu(&self) -> Vec<SideRow> {
+        self.controls.side_menu()
     }
 
     /// Whether this panel can be shown (its tool is installed).
@@ -317,6 +336,7 @@ impl DeviceSettings for LinuxDevice {
         }
         tabs.extend(network);
         tabs.extend(self.devices());
+        tabs.extend(self.controls.tabs());
         tabs
     }
 
@@ -328,7 +348,14 @@ impl DeviceSettings for LinuxDevice {
         }
     }
 
-    fn set(&self, _tab: &str, control: &str, value: Value) -> Result<(), String> {
+    fn set(&self, tab: &str, control: &str, value: Value) -> Result<(), String> {
+        if let Value::Step(step) = value
+            && let Some(command) = self.controls.command(tab, control, step)
+        {
+            let (program, args) = command.split_first().ok_or("no command")?;
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            return run(program, &args).map(drop);
+        }
         let on_off = |on: bool| if on { "on" } else { "off" };
         match (control, value) {
             ("volume", Value::Number(level)) => run(

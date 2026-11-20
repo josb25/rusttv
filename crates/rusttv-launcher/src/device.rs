@@ -102,6 +102,9 @@ pub enum ControlKind {
     Text { secret: bool },
     /// Shows `detail` only.
     Info,
+    /// Left and Right move something one step either way, with no value
+    /// to show (a projector's lens focus); sent as [`Value::Step`].
+    Nudge,
 }
 
 /// A control's new value, for [`DeviceSettings::set`].
@@ -111,6 +114,8 @@ pub enum Value {
     Toggle(bool),
     /// A [`ControlKind::Slider`]'s new value.
     Number(i32),
+    /// A [`ControlKind::Nudge`] moved: `1` right (or up), `-1` left.
+    Step(i32),
     /// The index of a [`ControlKind::Choice`]'s new option.
     Choice(usize),
     /// A [`ControlKind::Action`] was chosen.
@@ -259,9 +264,12 @@ pub(crate) fn adjust(control: &mut Control, input: Input, right_to_left: bool) -
             *selected = (*selected + 1) % options.len();
             Adjust::Changed(Value::Choice(*selected))
         }
-        (ControlKind::Slider { .. } | ControlKind::Choice { .. }, Input::OkReleased, _) => {
-            Adjust::Kept
-        }
+        (ControlKind::Nudge, _, Some(direction)) => Adjust::Changed(Value::Step(direction)),
+        (
+            ControlKind::Slider { .. } | ControlKind::Choice { .. } | ControlKind::Nudge,
+            Input::OkReleased,
+            _,
+        ) => Adjust::Kept,
         _ => Adjust::Ignored,
     }
 }
@@ -439,6 +447,7 @@ impl DeviceSettings for FakeDevice {
                     "",
                     ControlKind::Text { secret: false },
                 ),
+                control("focus", "Focus", "", ControlKind::Nudge),
             ],
         }]
     }
@@ -530,7 +539,7 @@ impl DeviceSettings for FakeDevice {
             ("wifi", Value::Toggle(on)) => state.wifi = on,
             ("bluetooth", Value::Toggle(on)) => state.bluetooth = on,
             ("night-light", Value::Toggle(on)) => state.night_light = on,
-            ("name", Value::Text(_)) => {}
+            ("name", Value::Text(_)) | ("focus", Value::Step(_)) => {}
             (control, Value::Action) if control.starts_with("connect:") => {
                 state.network = control.strip_prefix("connect:").map(str::to_owned);
             }

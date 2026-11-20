@@ -9,6 +9,7 @@
 //! manager's job, so the launcher's updater does nothing here.
 
 mod device;
+mod device_file;
 mod gamepad;
 mod keyboard;
 mod overlay;
@@ -97,6 +98,8 @@ pub struct LinuxPlatform {
     overlay: Option<overlay::Overlay>,
     /// The volume bar over apps, once a volume key was pressed over one.
     volume_bar: Option<overlay::VolumeBar>,
+    /// The test pattern, once a control that shows it moved.
+    pattern: Option<overlay::PatternOverlay>,
 }
 
 impl fmt::Debug for LinuxPlatform {
@@ -130,11 +133,7 @@ impl LinuxPlatform {
         let desktops = var("XDG_CURRENT_DESKTOP")
             .map(|value| value.split(':').map(str::to_owned).collect())
             .unwrap_or_default();
-        let language = ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .find_map(|name| var(name))
-            .filter(|value| value != "C" && value != "POSIX");
-        Self::new(dirs, desktops, language)
+        Self::new(dirs, desktops, ui_language())
     }
 
     /// A platform over these data directories (most important first), desktop
@@ -153,6 +152,7 @@ impl LinuxPlatform {
             sizes: None,
             overlay: None,
             volume_bar: None,
+            pattern: None,
         }
     }
 
@@ -571,13 +571,32 @@ impl Platform for LinuxPlatform {
 
     fn open_overlay(&mut self, overlay: crate::platform::AppOverlay) -> bool {
         let device: Arc<dyn DeviceSettings> = self.device.clone();
-        self.overlay = overlay::Overlay::open(overlay, device);
+        self.overlay = overlay::Overlay::open(overlay, device, self.device.side_menu());
         self.overlay.is_some()
     }
 
     fn close_overlay(&mut self, to_home: bool) {
         if let Some(overlay) = &self.overlay {
             overlay.close(to_home);
+        }
+    }
+
+    fn nudged(&mut self, tab: &str, control: &str) {
+        if !self.device.shows_pattern(tab, control) {
+            return;
+        }
+        // The side menu draws the pattern itself, while that row is focused.
+        if overlay::shown()
+            && let Some(overlay) = &self.overlay
+        {
+            overlay.point(tab, control);
+            return;
+        }
+        if self.pattern.is_none() {
+            self.pattern = overlay::PatternOverlay::start();
+        }
+        if let Some(pattern) = &self.pattern {
+            pattern.show();
         }
     }
 
@@ -825,6 +844,15 @@ fn expand_percent(arg: &str, entry: &DesktopEntry) -> String {
 
 /// The value of `key` in the best matching locale: `lang_COUNTRY@MODIFIER`,
 /// `lang_COUNTRY`, `lang@MODIFIER`, `lang`, then the plain key.
+/// The UI's language from the environment (`LANG` style), unless it is the
+/// plain C locale.
+fn ui_language() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .filter(|value| value != "C" && value != "POSIX")
+}
+
 fn localized(values: &HashMap<&str, &str>, key: &str, language: Option<&str>) -> Option<String> {
     if let Some(language) = language {
         let locale = language.split('.').next().unwrap_or(language);

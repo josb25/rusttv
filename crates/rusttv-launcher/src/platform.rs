@@ -231,6 +231,11 @@ pub trait Platform {
     /// Closes the app overlay, if it is open; `to_home`: Home was pressed.
     fn close_overlay(&mut self, _to_home: bool) {}
 
+    /// A [`crate::device::ControlKind::Nudge`] control (tab `tab`, id
+    /// `control`) was stepped: the platform may show what helps to judge
+    /// it, such as a test pattern over everything for a lens focus.
+    fn nudged(&mut self, _tab: &str, _control: &str) {}
+
     /// The volume changed (a volume key): shows it over everything, the
     /// home screen and apps alike (and in the app overlay, if it is open).
     /// `muted`: the word for a muted volume, in the current language.
@@ -750,6 +755,8 @@ pub struct FakePlatform {
     /// App overlays opened, and whether one is open.
     overlays: Vec<AppOverlay>,
     overlay_open: bool,
+    /// Nudge controls stepped, as "tab/control".
+    nudges: Vec<String>,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -779,6 +786,11 @@ impl FakePlatform {
     /// The app overlays opened, in order.
     pub fn overlays(&self) -> &[AppOverlay] {
         &self.overlays
+    }
+
+    /// The nudge controls stepped ([`Platform::nudged`]), as "tab/control".
+    pub fn nudges(&self) -> &[String] {
+        &self.nudges
     }
 
     /// Whether an app overlay is open.
@@ -1088,6 +1100,10 @@ impl Platform for FakePlatform {
 
     fn close_overlay(&mut self, _to_home: bool) {
         self.overlay_open = false;
+    }
+
+    fn nudged(&mut self, tab: &str, control: &str) {
+        self.nudges.push(format!("{tab}/{control}"));
     }
 
     fn last_app(&self) -> Option<String> {

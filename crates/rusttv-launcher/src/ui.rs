@@ -241,6 +241,20 @@ impl Lifecycle {
         self.deliver(move |controller| controller.volume_key(change));
     }
 
+    /// A device control's key pressed outside the window (Linux:
+    /// `--control TAB/CONTROL left|right`, bound in the compositor, e.g.
+    /// a projector remote's focus keys): steps that nudge control by
+    /// `step` (`1` right, `-1` left), as its Settings row would.
+    #[cfg_attr(
+        not(feature = "linux"),
+        allow(dead_code, reason = "called by the Linux binary")
+    )]
+    pub fn control(&self, tab: String, control: String, step: i32) {
+        self.deliver(move |controller| {
+            controller.change_device(tab, control, crate::device::Value::Step(step));
+        });
+    }
+
     /// Home held (Linux: `--app-menu`): the app overlay over the app in
     /// front (its size, the volume, closing it), or closes it when it is
     /// open. Over the home screen, or where there is no overlay, just Home.
@@ -2921,6 +2935,10 @@ mod tests {
         fn close_overlay(&mut self, to_home: bool) {
             self.platform.borrow_mut().close_overlay(to_home);
         }
+
+        fn nudged(&mut self, tab: &str, control: &str) {
+            self.platform.borrow_mut().nudged(tab, control);
+        }
     }
 
     struct Screen {
@@ -4400,6 +4418,52 @@ mod tests {
         screen.tap(OK);
         assert!(screen.window.get_prompt_shown());
         assert_eq!(screen.window.get_prompt_text(), "", "a new prompt is empty");
+    }
+
+    #[test]
+    fn a_nudge_control_steps_both_ways_and_from_outside() {
+        let platform = abc().with_device();
+        let device = platform.device().unwrap();
+        let screen = screen_with(platform, None);
+        click_settings(&screen.window);
+        settle(&screen);
+        let display = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section == "Display")
+            .unwrap();
+        for _ in 0..display {
+            screen.tap(DOWN);
+        }
+        // Focus is the Display tab's fourth row.
+        screen.tap(RIGHT);
+        for _ in 0..3 {
+            screen.tap(DOWN);
+        }
+        screen.tap(RIGHT);
+        screen.tap(LEFT);
+        // OK does nothing on it.
+        screen.tap(OK);
+        settle(&screen);
+        assert_eq!(
+            device
+                .changes()
+                .iter()
+                .filter(|change| change.starts_with("display/focus"))
+                .collect::<Vec<_>>(),
+            ["display/focus=Step(1)", "display/focus=Step(-1)"]
+        );
+        // A remote's key bound in the compositor does the same.
+        screen
+            .lifecycle
+            .control("display".into(), "focus".into(), 1);
+        settle(&screen);
+        assert_eq!(device.changes().last().unwrap(), "display/focus=Step(1)");
+        assert_eq!(
+            screen.shared.platform.borrow().nudges(),
+            ["display/focus", "display/focus", "display/focus"]
+        );
     }
 
     #[test]

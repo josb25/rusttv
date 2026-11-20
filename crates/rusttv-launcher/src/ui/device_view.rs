@@ -103,6 +103,7 @@ pub(super) fn control_row(window: &HomeWindow, control: &Control) -> SettingsRow
         ControlKind::Choice { options, selected } => {
             row.detail = given(options.get(*selected).cloned().unwrap_or_default());
         }
+        ControlKind::Nudge => row.detail = given("‹  ›".to_owned()),
         ControlKind::Action | ControlKind::Text { .. } | ControlKind::Info => {}
     }
     row
@@ -214,6 +215,11 @@ impl Controller {
         let Some(device) = self.device.clone() else {
             return;
         };
+        if matches!(value, Value::Step(_)) {
+            // A lens focus and the like: the platform may show a test
+            // pattern while it moves.
+            self.platform.nudged(&tab, &control);
+        }
         self.device_pending += 1;
         let started = in_background(
             "rusttv-device",

@@ -38,6 +38,11 @@
 //!   <action name="Execute" command="rusttv-launcher-linux --volume mute" />
 //! </keybind>
 //! ```
+//!
+//! `rusttv-launcher-linux --control TAB/ID left|right` steps a control of
+//! the device's file (`/etc/rusttv/device.d`, e.g. `projector/focus`) and
+//! shows what goes with it (the test pattern); without a running launcher
+//! the control steps all the same. Bind it to the remote's keys for it.
 
 use std::cell::RefCell;
 use std::error::Error;
@@ -48,7 +53,7 @@ use std::sync::Arc;
 
 use rusttv_launcher::{
     AppEvent, DeviceSettings as _, Lifecycle, Limits, LinuxDevice, LinuxPlatform, RunOptions,
-    VolumeChange, run, start_desktop_history,
+    Value, VolumeChange, run, start_desktop_history,
 };
 
 /// Logs info, warnings and errors of the launcher to stderr (the session's
@@ -112,6 +117,8 @@ enum Signal {
     Volume(VolumeChange),
     /// The power key (`--power`).
     Power,
+    /// A device control stepped (`--control`).
+    Control { tab: String, id: String, step: i32 },
 }
 
 /// Hands `signal` to the home screen on the UI thread, where the lifecycle
@@ -134,6 +141,7 @@ fn deliver(signal: Signal) {
                     Signal::AppMenu => lifecycle.app_menu(),
                     Signal::Volume(change) => lifecycle.volume(change),
                     Signal::Power => lifecycle.power_menu(),
+                    Signal::Control { tab, id, step } => lifecycle.control(tab, id, step),
                 }
             }
         });
@@ -199,8 +207,9 @@ fn home_socket() -> Option<PathBuf> {
         .map(|dir| PathBuf::from(dir).join("rusttv-launcher.sock"))
 }
 
-/// Accepts `home` messages from `--home`, `power` from `--power` and
-/// `volume <up|down|mute>` from `--volume` for as long as the launcher runs.
+/// Accepts `home` messages from `--home`, `power` from `--power`,
+/// `volume <up|down|mute>` from `--volume` and `control TAB/ID left|right`
+/// from `--control` for as long as the launcher runs.
 fn listen_for_home(path: PathBuf) {
     // A socket left by an earlier run would make bind fail.
     let _ = std::fs::remove_file(&path);
@@ -216,7 +225,7 @@ fn listen_for_home(path: PathBuf) {
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut message = String::new();
-                if stream.take(32).read_to_string(&mut message).is_err() {
+                if stream.take(256).read_to_string(&mut message).is_err() {
                     continue;
                 }
                 let message = message.trim();
@@ -231,6 +240,14 @@ fn listen_for_home(path: PathBuf) {
                     .and_then(VolumeChange::parse)
                 {
                     deliver(Signal::Volume(change));
+                } else if let Some((tab, id, step)) =
+                    message.strip_prefix("control ").and_then(parse_control)
+                {
+                    deliver(Signal::Control {
+                        tab: tab.to_owned(),
+                        id: id.to_owned(),
+                        step,
+                    });
                 }
             }
         });
@@ -266,8 +283,44 @@ fn send_volume(change: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-const USAGE: &str =
-    "usage: rusttv-launcher-linux [--home | --app-menu | --power | --volume up|down|mute]";
+/// `TAB/ID left|right` → (tab, id, -1 or 1).
+fn parse_control(text: &str) -> Option<(&str, &str, i32)> {
+    let (control, direction) = text.split_once(' ')?;
+    let (tab, id) = control.split_once('/')?;
+    let step = match direction.trim() {
+        "left" => -1,
+        "right" => 1,
+        _ => return None,
+    };
+    (!tab.is_empty() && !id.is_empty()).then_some((tab, id, step))
+}
+
+/// `--control TAB/ID left|right`: the running launcher steps the control
+/// and shows what goes with it; without one, the control steps all the
+/// same.
+fn send_control(control: &str, direction: &str) -> Result<(), Box<dyn Error>> {
+    let text = format!("{control} {direction}");
+    let (tab, id, step) = parse_control(&text).ok_or(USAGE)?;
+    let sent = home_socket()
+        .and_then(|path| UnixStream::connect(path).ok())
+        .is_some_and(|mut stream| {
+            stream
+                .write_all(
+                    format!(
+                        "control {text}
+"
+                    )
+                    .as_bytes(),
+                )
+                .is_ok()
+        });
+    if !sent {
+        LinuxDevice::detect().set(tab, id, Value::Step(step))?;
+    }
+    Ok(())
+}
+
+const USAGE: &str = "usage: rusttv-launcher-linux [--home | --app-menu | --power |                      --volume up|down|mute | --control TAB/ID left|right]";
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -282,6 +335,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ["--app-menu"] => return send_key("app-menu"),
         ["--power"] => return send_key("power"),
         ["--volume", change] => return send_volume(change),
+        ["--control", control, direction] => return send_control(control, direction),
         _ => return Err(USAGE.into()),
     }
     if log::set_logger(&Stderr).is_ok() {

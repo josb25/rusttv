@@ -10,11 +10,17 @@
 //! under the pointer; a click beside the panel closes it. When it closes,
 //! the launcher hears how ([`crate::ui::overlay_closed`]).
 //!
+//! The device's own side-menu controls (from its device file, e.g. a
+//! projector's lens focus) are rows too; while one that asks for it has the
+//! focus, the app shows undimmed with a test pattern over it.
+//!
 //! The volume bar ([`VolumeBar`]) shows over apps the same way, when a
-//! volume key is pressed while an app is in front.
+//! volume key is pressed while an app is in front; the test pattern
+//! ([`PatternOverlay`]) when such a control moves another way.
 
 mod draw;
 mod panel;
+mod pattern;
 mod volume_bar;
 
 use std::fs::File;
@@ -23,6 +29,7 @@ use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use ab_glyph::FontVec;
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
@@ -47,10 +54,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     },
 };
 
-use crate::device::{DeviceSettings, Volume};
+use crate::device::{DeviceSettings, Value, Volume};
+use crate::linux::device_file::SideRow;
 use crate::platform::{AppOverlay, OverlayClosed, OverlayTexts};
 use draw::{Hit, Part};
 use panel::{Effect, Panel};
+pub use pattern::PatternOverlay;
 pub use volume_bar::VolumeBar;
 
 /// Linux input event codes (`linux/input-event-codes.h`) the overlay reads.
@@ -79,6 +88,9 @@ mod code {
 /// trackpad sends many small amounts.
 const SCROLL_STEP: f64 = 10.0;
 
+/// Key repeat where the compositor doesn't say: after this, this often.
+const REPEAT: (Duration, Duration) = (Duration::from_millis(600), Duration::from_millis(40));
+
 /// Whether the overlay is on screen (game controllers steer it then).
 static SHOWN: AtomicBool = AtomicBool::new(false);
 
@@ -93,6 +105,9 @@ enum Command {
     Close { to_home: bool },
     /// The volume changed (a volume key).
     Volume(Volume),
+    /// A device control moved from outside (the remote's focus keys):
+    /// focus its row.
+    Point { tab: String, id: String },
 }
 
 /// An open app overlay; it runs on a thread of its own until it closes.
@@ -106,7 +121,12 @@ pub struct Overlay {
 impl Overlay {
     /// Opens the overlay; `None` without a font or a thread for it. Without
     /// a compositor that offers a layer shell it closes again at once.
-    pub fn open(overlay: AppOverlay, device: Arc<dyn DeviceSettings>) -> Option<Self> {
+    /// `side`: the device's own side-menu controls.
+    pub fn open(
+        overlay: AppOverlay,
+        device: Arc<dyn DeviceSettings>,
+        side: Vec<SideRow>,
+    ) -> Option<Self> {
         let Some(font) = crate::linux::keyboard::draw::load_font() else {
             log::warn!("no font for the app overlay");
             return None;
@@ -121,8 +141,8 @@ impl Overlay {
         let spawned = std::thread::Builder::new()
             .name("rusttv-overlay".into())
             .spawn(move || {
-                let closed =
-                    run(overlay, device, font, &received, &wake_read).unwrap_or_else(|error| {
+                let closed = run(overlay, device, side, font, &received, &wake_read)
+                    .unwrap_or_else(|error| {
                         log::warn!("app overlay: {error}");
                         OverlayClosed {
                             app,
@@ -151,6 +171,14 @@ impl Overlay {
     /// Shows a new volume.
     pub fn volume(&self, volume: Volume) {
         self.send(Command::Volume(volume));
+    }
+
+    /// Device control `id` of tab `tab` moved: its row gets the focus.
+    pub fn point(&self, tab: &str, id: &str) {
+        self.send(Command::Point {
+            tab: tab.to_owned(),
+            id: id.to_owned(),
+        });
     }
 
     fn send(&self, command: Command) {
@@ -248,6 +276,7 @@ fn wait<D>(
 fn run(
     overlay: AppOverlay,
     device: Arc<dyn DeviceSettings>,
+    side: Vec<SideRow>,
     font: FontVec,
     commands: &Receiver<Command>,
     wake: &OwnedFd,
@@ -288,13 +317,15 @@ fn run(
         keyboard: None,
         pointer: None,
         font,
-        panel: Panel::new(overlay.size, volume),
+        panel: Panel::new(overlay.size, volume, side),
         title: overlay.title,
         texts: overlay.texts,
         device,
         pointer_at: None,
         scroll: 0.0,
         ok_down: false,
+        repeat: Some(REPEAT),
+        held: None,
         done: None,
     };
     SHOWN.store(true, Ordering::Relaxed);
@@ -302,13 +333,23 @@ fn run(
         if let Some(done) = state.done {
             break done;
         }
-        if wait(&mut queue, &mut state, wake, None)? {
+        let timeout = state
+            .held
+            .map(|(_, at)| at.saturating_duration_since(Instant::now()));
+        let woken = wait(&mut queue, &mut state, wake, timeout)?;
+        state.repeat_held(&qh);
+        if woken {
             while let Ok(command) = commands.try_recv() {
                 match command {
                     Command::Close { to_home } => state.done = Some((false, to_home)),
                     Command::Volume(volume) => {
                         if state.panel.volume.is_some() {
                             state.panel.volume = Some(volume);
+                            state.redraw(&qh);
+                        }
+                    }
+                    Command::Point { tab, id } => {
+                        if state.panel.focus_control(&tab, &id) {
                             state.redraw(&qh);
                         }
                     }
@@ -357,6 +398,10 @@ struct State {
     scroll: f64,
     /// OK went down here (its release runs the row).
     ok_down: bool,
+    /// Key repeat: (delay, interval); `None`: no repeat.
+    repeat: Option<(Duration, Duration)>,
+    /// The key held down that repeats, and when it next does.
+    held: Option<(u32, Instant)>,
     /// Closing: (close the app, Home was pressed).
     done: Option<(bool, bool)>,
 }
@@ -396,9 +441,50 @@ impl State {
                 }
                 self.redraw(qh);
             }
+            Effect::Nudge(n, step) => {
+                let Some(row) = self.panel.side.get(n) else {
+                    return;
+                };
+                let (tab, id) = (row.tab.clone(), row.id.clone());
+                if let Err(error) = self.device.set(&tab, &id, Value::Step(step)) {
+                    log::warn!("{tab}/{id}: {error}");
+                }
+                // Its own key, pressed on another row: that row is focused
+                // (and the pattern shows).
+                if self.panel.focus_control(&tab, &id) {
+                    self.redraw(qh);
+                }
+            }
             Effect::CloseApp => self.done = Some((true, false)),
             Effect::Dismiss => self.done = Some((false, false)),
         }
+    }
+
+    /// A key went down or up: keys that step or move repeat while held.
+    fn key(&mut self, key: u32, pressed: bool, qh: &QueueHandle<Self>) {
+        let repeats = matches!(key, code::UP | code::DOWN | code::LEFT | code::RIGHT)
+            || self.panel.device_key(key).is_some();
+        if pressed && repeats {
+            self.held = self.repeat.map(|(delay, _)| (key, Instant::now() + delay));
+        } else if self.held.is_some_and(|(held, _)| held == key) {
+            self.held = None;
+        }
+        let effect = key_effect(&mut self.panel, &mut self.ok_down, key, pressed);
+        self.apply(effect, qh);
+    }
+
+    /// The held key again, if its time came.
+    fn repeat_held(&mut self, qh: &QueueHandle<Self>) {
+        let (Some((key, at)), Some((_, interval))) = (self.held, self.repeat) else {
+            return;
+        };
+        let now = Instant::now();
+        if now < at {
+            return;
+        }
+        self.held = Some((key, now + interval));
+        let effect = key_effect(&mut self.panel, &mut self.ok_down, key, true);
+        self.apply(effect, qh);
     }
 
     fn hit(&self) -> Option<Hit> {
@@ -458,6 +544,13 @@ impl State {
 /// its release, and only after its press came here (not the release of a
 /// key that opened the overlay); `ok_down` keeps that.
 fn key_effect(panel: &mut Panel, ok_down: &mut bool, key: u32, pressed: bool) -> Effect {
+    if let Some((n, step)) = panel.device_key(key) {
+        return if pressed {
+            Effect::Nudge(n, step)
+        } else {
+            Effect::None
+        };
+    }
     let focus = panel.focus();
     match (key, pressed) {
         (code::UP, true) => panel.move_focus(-1),
@@ -488,15 +581,26 @@ impl Dispatch<WlKeyboard, ()> for State {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        if let wl_keyboard::Event::Key {
-            key,
-            state: WEnum::Value(key_state),
-            ..
-        } = event
-        {
-            let pressed = key_state == wl_keyboard::KeyState::Pressed;
-            let effect = key_effect(&mut state.panel, &mut state.ok_down, key, pressed);
-            state.apply(effect, qh);
+        match event {
+            wl_keyboard::Event::Key {
+                key,
+                state: WEnum::Value(key_state),
+                ..
+            } => state.key(key, key_state == wl_keyboard::KeyState::Pressed, qh),
+            wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state.repeat = u64::try_from(rate)
+                    .ok()
+                    .filter(|rate| *rate > 0)
+                    .map(|rate| {
+                        let delay = u64::try_from(delay).unwrap_or(0);
+                        (
+                            Duration::from_millis(delay),
+                            Duration::from_millis(1000 / rate),
+                        )
+                    });
+            }
+            wl_keyboard::Event::Leave { .. } => state.held = None,
+            _ => {}
         }
     }
 }
@@ -642,7 +746,7 @@ mod tests {
 
     #[test]
     fn keys_walk_the_rows() {
-        let mut panel = Panel::new(Some(100), None);
+        let mut panel = Panel::new(Some(100), None, Vec::new());
         let mut ok = false;
         let mut key = |panel: &mut Panel, code, pressed| key_effect(panel, &mut ok, code, pressed);
         assert_eq!(key(&mut panel, code::RIGHT, true), Effect::Redraw);
@@ -657,5 +761,29 @@ mod tests {
         // Volume up and a letter do nothing.
         assert_eq!(key(&mut panel, 115, true), Effect::None);
         assert_eq!(key(&mut panel, 30, true), Effect::None);
+    }
+
+    #[test]
+    fn a_device_control_s_own_keys_step_it_from_any_row() {
+        let focus = SideRow {
+            tab: "projector".into(),
+            id: "focus".into(),
+            label: "Focus".into(),
+            pattern: true,
+            keys: Some([202, 203]),
+        };
+        let mut panel = Panel::new(Some(100), None, vec![focus]);
+        let mut ok = false;
+        assert_eq!(
+            key_effect(&mut panel, &mut ok, 203, true),
+            Effect::Nudge(0, 1)
+        );
+        assert_eq!(key_effect(&mut panel, &mut ok, 203, false), Effect::None);
+        assert_eq!(
+            key_effect(&mut panel, &mut ok, 202, true),
+            Effect::Nudge(0, -1)
+        );
+        // The size row kept the focus (the overlay moves it on the step).
+        assert_eq!(panel.size, Some(100));
     }
 }
