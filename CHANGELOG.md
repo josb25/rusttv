@@ -8,6 +8,9 @@ field in `--json` output says which contract you get, CLI.md).
 
 ### Launcher
 
+- Apps that only have a phone launcher entry (no TV entry) show up like
+  any other app, with their icon. An app with a TV entry still shows only
+  that one.
 - The About page opens with less work: the licence notices are read straight
   from the APK (no Java string conversions), ahead of time on a background
   thread after the first frame, and kept after the page closes instead of
