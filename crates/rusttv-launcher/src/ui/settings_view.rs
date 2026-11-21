@@ -121,12 +121,8 @@ impl Controller {
     /// OK on the Settings entry of the top-right menu.
     pub(super) fn open_settings(&mut self) {
         self.settings = Some(
-            // About's section where Home has no About tile to open the
-            // licence notices and Slint's attribution: under a top-right
-            // menu, and while the About tile is hidden (PANELS.md § 6).
-            SettingsPage::new(Overview::default(), self.options.right_to_left).with_about(
-                self.platform.top_right_menu() || self.home.is_hidden(&crate::model::TileId::About),
-            ),
+            // About is a section of Settings, not a tile (PANELS.md § 6).
+            SettingsPage::new(Overview::default(), self.options.right_to_left).with_about(true),
         );
         self.settings_status = (status::READING, String::new());
         self.refresh_settings_data();
@@ -269,7 +265,10 @@ impl Controller {
                 self.settings_status = (status::NONE, String::new());
                 self.home.close_settings();
             }
-            Some(Action::Review(draft)) => self.open_review(draft),
+            // A setting's choice applies at once: one click, undone by
+            // another (and kept in the history). Only a restore, which can
+            // change many things at once, asks for Approve first.
+            Some(Action::Review(draft)) => self.apply_now(draft),
             Some(Action::Restore(id)) => {
                 let Some(history) = History::get() else {
                     return;
@@ -298,6 +297,10 @@ impl Controller {
                 let effect = self.home.open_about();
                 self.apply(effect);
             }
+            Some(Action::Remote) => {
+                let effect = self.home.open_remote();
+                self.apply(effect);
+            }
             None => {}
         }
     }
@@ -319,18 +322,70 @@ impl Controller {
             return;
         };
         let lines = self.review_lines_for(&window, &draft, overview);
-        let code = self.platform.random_code().map(Arrow::from_random);
         let count = lines.len();
         self.review_lines.set_vec(lines);
+        // Package changes go on to the computer, which carries them out
+        // because a person approved them here: only the code shown on a
+        // FLAG_SECURE screen proves that (SECURITY.md § Approval on the
+        // TV), so they still ask for it. Otherwise Approve confirms.
+        let has_packages = draft
+            .changes
+            .iter()
+            .any(|change| matches!(change, ApprovedChange::Package { .. }));
+        let code = has_packages.then(|| self.platform.random_code().map(Arrow::from_random));
         self.review_code.set_vec(
             code.iter()
+                .flatten()
                 .map(|arrow| arrow_value(*arrow))
                 .collect::<Vec<_>>(),
         );
         // Secure before the code can ever be drawn (it appears after Approve).
-        self.platform.set_secure(true);
+        self.platform.set_secure(code.is_some());
         self.review = Some(Review::new(draft, count, code, (self.clock)()));
         self.settings_status = (status::NONE, String::new());
+    }
+
+    /// Opens the review for one package change, as a restore with one
+    /// would: the screen that still asks for the code.
+    #[cfg(test)]
+    pub(super) fn review_package_change(&mut self) {
+        self.open_review(Draft {
+            changes: vec![ApprovedChange::Package {
+                name: "com.example.app".into(),
+                old: Some(rusttv_history::PackageState::Enabled),
+                new: rusttv_history::PackageState::Disabled,
+            }],
+            launcher: None,
+        });
+        self.render();
+    }
+
+    /// Applies a setting's new choice without a review.
+    fn apply_now(&mut self, draft: Draft) {
+        let Some(page) = &self.settings else {
+            return;
+        };
+        if page.overview().test_build {
+            self.settings_status = (status::TEST_BUILD, String::new());
+            return;
+        }
+        self.start_apply(draft);
+    }
+
+    /// Hands `draft` to the history thread; [`Self::applied`] reports.
+    fn start_apply(&mut self, draft: Draft) {
+        let Some(history) = History::get() else {
+            return;
+        };
+        self.settings_status = (status::BUSY, String::new());
+        let started = in_background(
+            "rusttv-apply",
+            move || history.apply(draft),
+            Controller::applied,
+        );
+        if let Err(error) = started {
+            self.settings_status = (status::NOTHING_CHANGED, error.to_string());
+        }
     }
 
     fn review_input(&mut self, input: Input) {
@@ -368,19 +423,11 @@ impl Controller {
                 let draft = review.draft().clone();
                 self.close_review();
                 self.swallow_ok_release = true;
-                let Some(history) = History::get() else {
-                    return;
-                };
-                history.correct_code();
-                self.settings_status = (status::BUSY, String::new());
-                let started = in_background(
-                    "rusttv-apply",
-                    move || history.apply(draft),
-                    Controller::applied,
-                );
-                if let Err(error) = started {
-                    self.settings_status = (status::NOTHING_CHANGED, error.to_string());
+                // Clears a lockout's count of wrong codes.
+                if let Some(history) = History::get() {
+                    history.correct_code();
                 }
+                self.start_apply(draft);
             }
         }
     }
@@ -661,23 +708,6 @@ impl Controller {
             } else {
                 let section = page.section();
                 let rows = match section {
-                    Section::Animations => {
-                        if !overview.can_write_settings {
-                            note.push(strings.invoke_grant_hint().to_string());
-                        }
-                        if page.animation_choice() == Some(0) {
-                            note.push(strings.invoke_off_note().to_string());
-                        }
-                        (0..crate::settings::ANIMATION_CHOICES.len())
-                            .map(|choice| SettingsRow {
-                                title: strings.invoke_animation_choice(to_i32(choice)),
-                                detail: "".into(),
-                                current: page.animation_choice() == Some(choice),
-                                dim: !overview.can_write_settings,
-                                ..SettingsRow::default()
-                            })
-                            .collect()
-                    }
                     Section::Effects => [false, true]
                         .into_iter()
                         .map(|reduced| SettingsRow {
@@ -745,6 +775,10 @@ impl Controller {
                         .into_iter()
                         .map(|about| self.about_row(window, page, about))
                         .collect(),
+                    Section::Remote => vec![row(
+                        strings.invoke_pair_phone(),
+                        &strings.invoke_pair_phone_detail(),
+                    )],
                     Section::Waiting => overview
                         .pending
                         .iter()
@@ -869,25 +903,25 @@ fn to_i32(value: usize) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
-fn section_value(section: Section) -> i32 {
-    match section {
-        Section::Animations => 0,
-        Section::Updates => 1,
-        Section::History => 2,
-        Section::Waiting => 3,
-        Section::Effects => 4,
-        Section::Ambient => 6,
-        // Tabs are named by the platform.
-        Section::About | Section::Tab(_) => 5,
-    }
-}
-
 fn arrow_value(arrow: Arrow) -> i32 {
     match arrow {
         Arrow::Up => 0,
         Arrow::Down => 1,
         Arrow::Left => 2,
         Arrow::Right => 3,
+    }
+}
+
+fn section_value(section: Section) -> i32 {
+    match section {
+        Section::Updates => 1,
+        Section::History => 2,
+        Section::Waiting => 3,
+        Section::Effects => 4,
+        Section::Ambient => 6,
+        Section::Remote => 7,
+        // Tabs are named by the platform.
+        Section::About | Section::Tab(_) => 5,
     }
 }
 

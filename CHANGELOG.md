@@ -11,6 +11,15 @@ field in `--json` output says which contract you get, CLI.md).
 - Apps that only have a phone launcher entry (no TV entry) show up like
   any other app, with their icon. An app with a TV entry still shows only
   that one.
+- Home holds apps: About, History and RustTV Remote are sections of
+  Settings instead of tiles (RustTV Remote's "Pair a phone" opens its page;
+  Back returns to Settings). Their tiles leave Home on upgrade.
+- Settings has no Animations section: the animation speed is a system
+  setting, changed in the TV's own Settings (Developer options). The
+  computer can still set it (`rusttv history`), and a restore still puts it
+  back.
+- A setting's choice in Settings applies on one click; only a restore asks
+  for Approve, and only package changes still ask for the arrow code.
 - The About page opens with less work: the licence notices are read straight
   from the APK (no Java string conversions), ahead of time on a background
   thread after the first frame, and kept after the page closes instead of

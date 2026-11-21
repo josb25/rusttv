@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use rusttv_history::door::{ApprovedChange, PendingApproval};
-use rusttv_history::{Author, Change, EntryId, Launcher, SETTING_KEYS};
+use rusttv_history::{Author, Change, EntryId, Launcher};
 
 use crate::device::{Adjust, ControlKind, Tab, Value, adjust};
 use crate::model::Input;
@@ -54,7 +54,6 @@ pub(crate) struct EntryView {
 /// A section of the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Section {
-    Animations,
     /// Full or reduced effects (shadows, backdrop) for a weak GPU.
     Effects,
     /// The idle screen on or off (PANELS.md § 9 Q6): after a while on
@@ -63,6 +62,8 @@ pub(crate) enum Section {
     Updates,
     History,
     Waiting,
+    /// RustTV Remote: one row, OK opens its page (pairing, the phones).
+    Remote,
     /// A tab the platform adds, by its index in [`SettingsPage::tabs`].
     Tab(usize),
     /// RustTV and the host; always last.
@@ -81,13 +82,6 @@ pub(crate) enum AboutRow {
     /// A fact about the host, by its index in [`SettingsPage::host`].
     Host(usize),
 }
-
-/// The animation choices, from off to slowest: every scale set to this
-/// value (Android's developer options offer the same range).
-pub(crate) const ANIMATION_CHOICES: [&str; 7] = ["0", "0.25", "0.5", "0.75", "1", "1.5", "2"];
-
-/// The choice that is Android's default.
-pub(crate) const NORMAL_ANIMATIONS: usize = 4;
 
 /// Something ui.rs must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +112,8 @@ pub(crate) enum Action {
     Update,
     /// Open the licence and third-party notices (the About page).
     Notices,
+    /// Open the RustTV Remote page.
+    Remote,
 }
 
 /// Changes waiting for review.
@@ -186,11 +182,9 @@ impl SettingsPage {
         self.loaded
     }
 
-    /// Whether Settings has its About tab: where a top-right menu replaces
-    /// the About tile (Linux), and while the About tile is hidden, so the
-    /// licence notices and Slint's attribution stay reachable (PANELS.md
-    /// § 6). Otherwise the About tile opens the About page and Settings
-    /// stays as it was.
+    /// Whether Settings has its About tab, which holds the licence notices
+    /// and Slint's attribution (PANELS.md § 6). Home has no About tile, so
+    /// the launcher always asks for it; tests leave it out.
     pub fn with_about(mut self, about: bool) -> Self {
         self.about = about;
         self
@@ -290,7 +284,6 @@ impl SettingsPage {
     /// the platform's tabs and About.
     pub fn sections(&self) -> Vec<Section> {
         let mut sections = vec![
-            Section::Animations,
             Section::Effects,
             Section::Ambient,
             Section::Updates,
@@ -299,6 +292,7 @@ impl SettingsPage {
         if !self.overview.pending.is_empty() {
             sections.push(Section::Waiting);
         }
+        sections.push(Section::Remote);
         sections.extend((0..self.tabs.len()).map(Section::Tab));
         if self.about {
             sections.push(Section::About);
@@ -360,42 +354,26 @@ impl SettingsPage {
         matches!(self.focus, Focus::Detail(entry) if entry > 0)
     }
 
-    /// The current animation choice, `None` when the scales differ or are
-    /// set to something else.
-    pub fn animation_choice(&self) -> Option<usize> {
-        let values: Vec<String> = SETTING_KEYS
-            .iter()
-            .map(|key| {
-                self.overview
-                    .settings
-                    .get(*key)
-                    .map_or_else(|| "1".to_owned(), Clone::clone)
-            })
-            .collect();
-        ANIMATION_CHOICES.iter().position(|choice| {
-            values
-                .iter()
-                .all(|value| value.parse::<f64>().ok() == choice.parse::<f64>().ok())
-        })
-    }
-
     /// Where focus lands in the panel: on the current choice, else the top.
     fn entry_row(&self) -> usize {
         match self.section() {
-            Section::Animations => self.animation_choice().unwrap_or(NORMAL_ANIMATIONS),
             Section::Effects => usize::from(self.overview.launcher.reduced_effects),
             Section::Ambient => usize::from(self.overview.launcher.ambient_off),
             Section::Updates => usize::from(!self.overview.launcher.update_check),
-            Section::History | Section::Waiting | Section::Tab(_) | Section::About => 0,
+            Section::History
+            | Section::Waiting
+            | Section::Remote
+            | Section::Tab(_)
+            | Section::About => 0,
         }
     }
 
     fn rows(&self) -> usize {
         match self.section() {
-            Section::Animations => ANIMATION_CHOICES.len(),
             Section::Effects | Section::Ambient | Section::Updates => 2,
             Section::History => self.overview.entries.len(),
             Section::Waiting => self.overview.pending.len(),
+            Section::Remote => 1,
             Section::Tab(tab) => self.tabs.get(tab).map_or(0, |tab| tab.controls.len()),
             Section::About => self.about_rows().len(),
         }
@@ -475,24 +453,6 @@ impl SettingsPage {
 
     fn activate(&mut self, row: usize) -> Option<Action> {
         match self.section() {
-            Section::Animations => {
-                if self.animation_choice() == Some(row) {
-                    return None;
-                }
-                let value = ANIMATION_CHOICES[row];
-                let changes = SETTING_KEYS
-                    .iter()
-                    .map(|key| ApprovedChange::Setting {
-                        key: (*key).to_owned(),
-                        old: self.overview.settings.get(*key).cloned(),
-                        new: Some(value.to_owned()),
-                    })
-                    .collect();
-                Some(Action::Review(Draft {
-                    changes,
-                    launcher: None,
-                }))
-            }
             Section::Effects => {
                 let reduced = row == 1;
                 if self.overview.launcher.reduced_effects == reduced {
@@ -533,6 +493,7 @@ impl SettingsPage {
                 self.focus = Focus::Detail(row);
                 None
             }
+            Section::Remote => Some(Action::Remote),
             Section::Waiting | Section::Tab(_) => None,
             Section::About => match self.about_rows().get(row)? {
                 AboutRow::Update => Some(Action::Update),
@@ -570,32 +531,9 @@ mod tests {
     }
 
     #[test]
-    fn choosing_faster_animations_reviews_all_three_scales() {
-        let mut page = page();
-        assert_eq!(page.animation_choice(), Some(NORMAL_ANIMATIONS));
-        assert_eq!(page.handle(Input::Right), None);
-        assert_eq!(
-            page.panel_row(),
-            Some(NORMAL_ANIMATIONS),
-            "focus starts on the current choice"
-        );
-        assert_eq!(page.handle(Input::OkReleased), None, "Normal is already on");
-        page.handle(Input::Up);
-        page.handle(Input::Up);
-        let Some(Action::Review(draft)) = page.handle(Input::OkReleased) else {
-            panic!("expected a review");
-        };
-        assert_eq!(draft.changes.len(), 3);
-        assert!(draft.changes.iter().all(|change| matches!(
-            change,
-            ApprovedChange::Setting { old: None, new: Some(new), .. } if new == "0.5"
-        )));
-    }
-
-    #[test]
     fn reducing_effects_reviews_the_launcher_state() {
         let mut page = page();
-        page.handle(Input::Down);
+        assert_eq!(page.section(), Section::Effects);
         page.handle(Input::Right);
         page.handle(Input::Down);
         let Some(Action::Review(draft)) = page.handle(Input::OkReleased) else {
@@ -607,7 +545,6 @@ mod tests {
     #[test]
     fn turning_the_idle_screen_off_reviews_the_launcher_state() {
         let mut page = page();
-        page.handle(Input::Down);
         page.handle(Input::Down);
         assert_eq!(page.section(), Section::Ambient);
         page.handle(Input::Right);
@@ -625,7 +562,6 @@ mod tests {
         let mut page = page();
         page.handle(Input::Down);
         page.handle(Input::Down);
-        page.handle(Input::Down);
         assert_eq!(page.section(), Section::Updates);
         page.handle(Input::Right);
         page.handle(Input::Down);
@@ -638,7 +574,7 @@ mod tests {
     #[test]
     fn an_older_entry_can_be_restored_but_not_the_newest() {
         let mut page = page();
-        for _ in 0..4 {
+        for _ in 0..3 {
             page.handle(Input::Down);
         }
         assert_eq!(page.section(), Section::History);
@@ -662,7 +598,7 @@ mod tests {
         assert_eq!(page.handle(Input::Right), None);
         assert_eq!(page.panel_row(), None);
         page.handle(Input::Left);
-        assert_eq!(page.panel_row(), Some(NORMAL_ANIMATIONS));
+        assert_eq!(page.panel_row(), Some(0), "on Full, the current effects");
         page.handle(Input::Back);
         assert_eq!(page.panel_row(), None);
         assert_eq!(page.handle(Input::Back), Some(Action::Close));
@@ -679,8 +615,20 @@ mod tests {
             change: Vec::new(),
         });
         page.refresh(overview);
-        assert_eq!(page.sections()[5], Section::Waiting);
+        assert_eq!(page.sections()[4], Section::Waiting);
+        assert_eq!(page.sections()[5], Section::Remote);
         assert_eq!(page.sections().last(), Some(&Section::About));
+    }
+
+    #[test]
+    fn the_remote_section_opens_the_remote_page() {
+        let mut page = page();
+        for _ in 0..4 {
+            page.handle(Input::Down);
+        }
+        assert_eq!(page.section(), Section::Remote);
+        page.handle(Input::Right);
+        assert_eq!(page.handle(Input::OkReleased), Some(Action::Remote));
     }
 
     #[test]
@@ -729,7 +677,7 @@ mod tests {
     fn about_rows_check_for_updates_and_open_the_notices() {
         let mut page = page();
         page.set_device(Vec::new(), vec![("Kernel".into(), "6.18".into())]);
-        for _ in 0..5 {
+        for _ in 0..6 {
             page.handle(Input::Down);
         }
         assert_eq!(page.section(), Section::About);
@@ -786,7 +734,7 @@ mod tests {
     fn show_history_selects_history_with_the_list_focused() {
         let mut page = page();
         page.handle(Input::Right);
-        assert!(page.panel_row().is_some(), "focus in Animations' rows");
+        assert!(page.panel_row().is_some(), "focus in Effects' rows");
         page.show_history();
         assert_eq!(page.section(), Section::History);
         assert_eq!(page.panel_row(), None);

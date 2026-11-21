@@ -164,23 +164,14 @@ export global Strings {
         if section == 4 { return @tr("Effects"); }
         if section == 5 { return @tr("About"); }
         if section == 6 { return @tr("Idle screen"); }
-        return @tr("Animations");
+        if section == 7 { return @tr("RustTV Remote"); }
+        return "";
     }
     // Settings' About tab (ui/settings_view.rs `AboutRow`): the Source row's
     // title. (Its Updates row is named like the Updates section; its RustTV
     // row is About's row face, templates/about_row.json.)
     public pure function source-code() -> string {
         return @tr("Source code");
-    }
-    // settings.rs ANIMATION_CHOICES: off to slowest.
-    public pure function animation-choice(choice: int) -> string {
-        if choice == 0 { return @tr("Off"); }
-        if choice == 1 { return @tr("Fastest (0.25×)"); }
-        if choice == 2 { return @tr("Faster (0.5×)"); }
-        if choice == 3 { return @tr("Fast (0.75×)"); }
-        if choice == 5 { return @tr("Slower (1.5×)"); }
-        if choice == 6 { return @tr("Slowest (2×)"); }
-        return @tr("Normal");
     }
     // The RustTV Remote page (REMOTE.md § 2; its note is in
     // templates/remote_page.json).
@@ -289,12 +280,6 @@ export global Strings {
     public pure function review-group(group: int) -> string {
         if group == 1 { return @tr("Your computer applies these: run rusttv history apply-pending within 2 hours"); }
         return @tr("This TV changes now");
-    }
-    public pure function grant-hint() -> string {
-        return @tr("To change this on the TV itself, run rusttv history allow-tv-settings on your computer once. Until then your computer applies it.");
-    }
-    public pure function off-note() -> string {
-        return @tr("Some apps may look odd without animations.");
     }
     public pure function history-empty() -> string {
         return @tr("No changes yet. Changes made here or from your computer appear here.");

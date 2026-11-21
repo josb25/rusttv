@@ -170,8 +170,16 @@ RustTV-Approved-By: tv-code sha256:… | terminal | delegation | upgrade | none
 | Change | On the TV |
 |---|---|
 | Move, hide, unhide, folders (make, rename, apps in and out; the launcher's direct edits, as today) | recorded as `tv` entries without a code |
-| Settings, the update switch, any restore | review + code + hold OK (§ 6) |
-| Packages | review + code + hold OK → pending for the Mac |
+| A setting's choice in Settings (effects, idle screen, the update switch) | applied on OK, recorded as a `tv` entry; another OK undoes it |
+| The animation scales | not offered on the TV (a system setting: the TV's own Settings has it); from the Mac, or put back by a restore |
+| A restore without packages | review, then OK on Approve |
+| Packages (in a restore) | review + code + hold OK (§ 6) → pending for the Mac |
+
+One click applies what one click undoes. A restore changes many things at
+once, so it asks for Approve. Only package changes keep the 4-arrow code
+and the 2 s hold: the Mac carries them out because a person approved them
+on the TV, and only the code on a `FLAG_SECURE` screen proves a person
+(§ 6.1); adb can inject any other key.
 
 ## 3. The store
 

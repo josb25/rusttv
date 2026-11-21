@@ -756,7 +756,11 @@ enum Mode {
     Settings {
         history: bool,
     },
-    Remote,
+    /// The RustTV Remote page; from Settings' RustTV Remote section
+    /// (`from_settings`), Back returns there.
+    Remote {
+        from_settings: bool,
+    },
     /// `selected` indexes `Home::quick_actions`.
     Bar {
         selected: usize,
@@ -827,6 +831,9 @@ pub struct Home {
     quick_actions: Vec<QuickAction>,
     /// About and Settings are tiles: the platform has no top-right menu.
     settings_tiles: bool,
+    /// About, RustTV Remote and History as tiles. The launcher turns them
+    /// off: they are sections of Settings, so Home holds apps.
+    page_tiles: bool,
     /// The folder a built-in tile's page was opened from: Back from the
     /// page opens it again, as after an app launched from it.
     page_folder: Option<OpenFolder>,
@@ -859,6 +866,7 @@ impl Home {
             app_sizes: false,
             quick_actions: Vec::new(),
             settings_tiles: false,
+            page_tiles: true,
             page_folder: None,
         }
     }
@@ -888,13 +896,25 @@ impl Home {
         }
     }
 
+    /// About, RustTV Remote and History as tiles ([`Home::has_builtin`]);
+    /// on by default. Off, their tiles leave Home and folders.
+    pub fn set_page_tiles(&mut self, tiles: bool) {
+        if tiles != self.page_tiles {
+            self.page_tiles = tiles;
+            if !self.apps.is_empty() {
+                self.refresh();
+            }
+        }
+    }
+
     /// Whether this Home has the built-in tile `id` (somewhere: on the
     /// grid, in a folder or hidden): About and Settings only as tiles
     /// ([`Home::set_settings_tiles`]), RustTV Remote and panel tiles always.
     fn has_builtin(&self, id: &TileId) -> bool {
         match id {
-            TileId::About | TileId::Settings => self.settings_tiles,
-            TileId::Remote | TileId::Panel(_) => true,
+            TileId::About => self.settings_tiles && self.page_tiles,
+            TileId::Settings => self.settings_tiles,
+            TileId::Remote | TileId::Panel(_) => self.page_tiles,
             TileId::App(_) | TileId::Hidden | TileId::Folder(_) => false,
         }
     }
@@ -1044,12 +1064,13 @@ impl Home {
             .filter(|app| !placed.contains(&app.id))
             .cloned()
             .collect();
-        // Built-in tiles off Home's grid: hidden, or in a folder.
+        // Built-in tiles off Home's grid: hidden, in a folder, or not on
+        // this Home at all.
         let away: Vec<TileId> = BUILTINS
             .iter()
             .filter(|id| {
                 let name = name_of(id);
-                self.hidden.contains(&name) || placed.contains(&name)
+                self.hidden.contains(&name) || placed.contains(&name) || !self.has_builtin(id)
             })
             .cloned()
             .collect();
@@ -1539,6 +1560,18 @@ impl Home {
         Some(Effect::OpenAbout)
     }
 
+    /// Opens the RustTV Remote page from the Settings page (its RustTV
+    /// Remote section); Back returns to Settings.
+    pub fn open_remote(&mut self) -> Option<Effect> {
+        if !matches!(self.mode, Mode::Settings { .. }) {
+            return None;
+        }
+        self.mode = Mode::Remote {
+            from_settings: true,
+        };
+        Some(Effect::OpenRemote)
+    }
+
     /// Closes the open quick panel (it decides when: Back); focus is back
     /// on its entry in the top-right menu.
     pub fn close_quick(&mut self) {
@@ -1562,8 +1595,14 @@ impl Home {
 
     /// Leaves the RustTV Remote page (it decides when: Back).
     pub fn close_remote(&mut self) {
-        if matches!(self.mode, Mode::Remote) {
-            self.mode = self.back_from_page();
+        match self.mode {
+            Mode::Remote {
+                from_settings: true,
+            } => self.mode = Mode::Settings { history: false },
+            Mode::Remote {
+                from_settings: false,
+            } => self.mode = self.back_from_page(),
+            _ => {}
         }
     }
 
@@ -1590,7 +1629,7 @@ impl Home {
     pub fn page(&self) -> Option<TileId> {
         match self.mode {
             Mode::About { .. } => Some(TileId::About),
-            Mode::Remote => Some(TileId::Remote),
+            Mode::Remote { .. } => Some(TileId::Remote),
             Mode::Settings { history: true } => Some(TileId::Panel(PanelId::History)),
             Mode::Settings { history: false } => Some(TileId::Settings),
             _ => None,
@@ -1613,7 +1652,7 @@ impl Home {
             Mode::Launching { .. } => State::Launching,
             Mode::About { .. } => State::About,
             Mode::Settings { .. } => State::Settings,
-            Mode::Remote => State::Remote,
+            Mode::Remote { .. } => State::Remote,
             Mode::Menu { .. } => State::Menu,
             Mode::Hidden { .. } => State::Hidden,
             Mode::Folder(_) => State::Folder,
@@ -1645,7 +1684,7 @@ impl Home {
                 Mode::Moving { .. }
                 | Mode::About { .. }
                 | Mode::Settings { .. }
-                | Mode::Remote
+                | Mode::Remote { .. }
                 | Mode::Menu { .. }
                 | Mode::Hidden { .. }
                 | Mode::Folder(_)
@@ -1683,7 +1722,7 @@ impl Home {
             }
             (Mode::About { .. }, Input::OkPressed) => Some(Effect::Update),
             (Mode::Settings { .. }, input) => Some(Effect::Settings(input)),
-            (Mode::Remote, input) => Some(Effect::Remote(input)),
+            (Mode::Remote { .. }, input) => Some(Effect::Remote(input)),
             (Mode::Quick { .. }, input) => Some(Effect::QuickInput(input)),
             (Mode::Bar { selected }, _) => {
                 let selected = *selected;
@@ -2218,7 +2257,12 @@ impl Home {
                 Effect::OpenAbout,
             ),
             TileId::Settings => (Mode::Settings { history: false }, Effect::OpenSettings),
-            TileId::Remote => (Mode::Remote, Effect::OpenRemote),
+            TileId::Remote => (
+                Mode::Remote {
+                    from_settings: false,
+                },
+                Effect::OpenRemote,
+            ),
             TileId::Panel(PanelId::History) => {
                 (Mode::Settings { history: true }, Effect::OpenHistory)
             }
@@ -4500,5 +4544,44 @@ mod tests {
                 TileId::Remote
             ]
         );
+    }
+
+    #[test]
+    fn without_page_tiles_home_keeps_only_apps_and_settings() {
+        let mut home = Home::new(Order::default(), BTreeMap::new(), BTreeSet::new(), false);
+        home.set_settings_tiles(true);
+        home.set_page_tiles(false);
+        home.set_apps(&[app("b", "B"), app("a", "A")]);
+        assert_eq!(home.tiles(), [id("a"), id("b"), TileId::Settings]);
+        assert!(!home.is_hidden(&TileId::About));
+    }
+
+    #[test]
+    fn turning_page_tiles_off_drops_them_from_home() {
+        let mut home = Home::new(Order::default(), BTreeMap::new(), BTreeSet::new(), false);
+        home.set_settings_tiles(true);
+        home.set_apps(&[app("a", "A")]);
+        assert!(home.tiles().contains(&TileId::Remote));
+        home.set_page_tiles(false);
+        assert_eq!(home.tiles(), [id("a"), TileId::Settings]);
+    }
+
+    #[test]
+    fn the_remote_page_opened_from_settings_returns_there() {
+        let mut home = Home::new(Order::default(), BTreeMap::new(), BTreeSet::new(), false);
+        home.set_settings_tiles(true);
+        home.set_page_tiles(false);
+        home.set_apps(&[app("a", "A")]);
+        assert_eq!(home.open_remote(), None, "only from Settings");
+        assert!(home.focus_on(&TileId::Settings));
+        home.handle(Input::OkPressed, ms(0));
+        assert_eq!(
+            home.handle(Input::OkReleased, ms(100)),
+            Some(Effect::OpenSettings)
+        );
+        assert_eq!(home.open_remote(), Some(Effect::OpenRemote));
+        assert_eq!(home.state(), State::Remote);
+        home.close_remote();
+        assert_eq!(home.page(), Some(TileId::Settings));
     }
 }

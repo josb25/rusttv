@@ -298,12 +298,6 @@ impl Link {
         }
     }
 
-    /// The last view sent to the phones.
-    #[cfg(test)]
-    pub(crate) fn last(&self) -> Option<&TvMessage> {
-        self.last.as_ref()
-    }
-
     /// Sends `message` to the phones if it differs from the last one.
     pub(crate) fn push(&mut self, message: TvMessage) {
         if self.last.as_ref() == Some(&message) {
