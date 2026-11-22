@@ -103,7 +103,7 @@ pub(super) fn control_row(window: &HomeWindow, control: &Control) -> SettingsRow
         ControlKind::Choice { options, selected } => {
             row.detail = given(options.get(*selected).cloned().unwrap_or_default());
         }
-        ControlKind::Action | ControlKind::Text { .. } | ControlKind::Info => {}
+        ControlKind::Action | ControlKind::Text { .. } | ControlKind::Info | ControlKind::Code => {}
     }
     row
 }

@@ -886,6 +886,12 @@ struct Controller {
     pointer_timer: Timer,
     /// The open text prompt, and the device control its text is for.
     prompt: Option<device_view::Prompt>,
+    /// The link Settings shows as a QR code (a platform tab's
+    /// `ControlKind::Code`); empty for none.
+    settings_code: String,
+    /// Reads the platform's tabs again while a code is shown, so it goes
+    /// once the phone has used it.
+    code_timer: Timer,
 }
 
 impl Controller {
@@ -1023,6 +1029,8 @@ impl Controller {
                 scroll_rest: 0.0,
                 pointer_timer: Timer::default(),
                 prompt: None,
+                settings_code: String::new(),
+                code_timer: Timer::default(),
             })
         });
         *controller.borrow().options.lifecycle.0.borrow_mut() = Rc::downgrade(&controller);
@@ -4478,6 +4486,37 @@ mod tests {
         screen.tap(OK);
         assert_eq!(screen.launched(), ["a/.Main"]);
         assert_eq!(screen.window.get_mode(), mode_value(State::Bar));
+    }
+
+    #[test]
+    fn a_link_row_shows_as_a_qr_code_beside_its_tab_only() {
+        let screen = screen_with(abc().with_device(), None);
+        click_settings(&screen.window);
+        settle(&screen);
+        assert_eq!(screen.window.get_settings_code().size().width, 0);
+        let display = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section == "Display")
+            .unwrap();
+        for _ in 0..display {
+            screen.tap(DOWN);
+        }
+        assert!(
+            screen.window.get_settings_code().size().width > 100,
+            "the Display tab has a sign-in link"
+        );
+        let rows: Vec<SharedString> = screen
+            .window
+            .get_settings_rows()
+            .iter()
+            .map(|row| row.detail)
+            .collect();
+        assert!(rows.contains(&SharedString::from("https://example.com/sign-in")));
+        // About, below it, has none.
+        screen.tap(DOWN);
+        assert_eq!(screen.window.get_settings_code().size().width, 0);
     }
 
     #[test]

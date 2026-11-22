@@ -1,7 +1,8 @@
 //! The device's settings on Linux (device.rs), through the system's own
 //! tools, each only where it is installed: `wpctl` (PipeWire/WirePlumber)
 //! for audio, `nmcli` (NetworkManager) for networks, `bluetoothctl` for
-//! Bluetooth and `systemctl` to restart or power off. Facts for About come
+//! Bluetooth, `systemctl` to restart or power off and `tailscale` for
+//! Tailscale (device/tailscale.rs). Facts for About come
 //! from `/etc/os-release`, `/proc` and `/sys`.
 //!
 //! Every method blocks on a tool (at most [`TOOL_TIMEOUT`]); the launcher
@@ -13,6 +14,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod net;
+mod tailscale;
 
 use super::program_exists;
 use crate::device::{
@@ -79,6 +81,7 @@ pub struct LinuxDevice {
     nmcli: bool,
     bluetoothctl: bool,
     systemctl: bool,
+    tailscale: bool,
     /// Another system to restart into (dual boot).
     other_os: Option<OtherOs>,
     /// Whether a Bluetooth search ran: Devices then lists what it found.
@@ -93,6 +96,7 @@ impl LinuxDevice {
             nmcli: program_exists("nmcli"),
             bluetoothctl: program_exists("bluetoothctl"),
             systemctl: program_exists("systemctl"),
+            tailscale: program_exists("tailscale"),
             other_os: std::fs::read_to_string(OTHER_OS)
                 .ok()
                 .and_then(|text| parse_other_os(&text)),
@@ -298,7 +302,7 @@ impl LinuxDevice {
 }
 
 impl DeviceSettings for LinuxDevice {
-    /// Sound and Network, as in their quick panels.
+    /// Sound and Network, as in their quick panels, Devices and Tailscale.
     fn tabs(&self) -> Vec<Tab> {
         let mut tabs = Vec::new();
         if let Some(mut audio) = self.audio() {
@@ -317,6 +321,9 @@ impl DeviceSettings for LinuxDevice {
         }
         tabs.extend(network);
         tabs.extend(self.devices());
+        if self.tailscale {
+            tabs.extend(tailscale::tab());
+        }
         tabs
     }
 
@@ -328,7 +335,12 @@ impl DeviceSettings for LinuxDevice {
         }
     }
 
-    fn set(&self, _tab: &str, control: &str, value: Value) -> Result<(), String> {
+    fn set(&self, tab: &str, control: &str, value: Value) -> Result<(), String> {
+        if tab == tailscale::TAB
+            && let Some(result) = tailscale::set(control, &value)
+        {
+            return result;
+        }
         let on_off = |on: bool| if on { "on" } else { "off" };
         match (control, value) {
             ("volume", Value::Number(level)) => run(
