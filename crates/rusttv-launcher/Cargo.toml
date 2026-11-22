@@ -28,6 +28,7 @@ linux = [
     "dep:reis",
     "dep:resvg",
     "dep:rustix",
+    "dep:serde_json",
     "dep:wayland-client",
     "dep:wayland-protocols-misc",
     "dep:wayland-protocols-wlr",
@@ -35,6 +36,12 @@ linux = [
     "slint/backend-winit-wayland",
     "slint/unstable-winit-030",
 ]
+
+# Draw with OpenGL ES (FemtoVG) instead of the CPU, for slow CPUs with a GPU.
+gpu = ["slint/renderer-femtovg"]
+# Draw with Skia on OpenGL ES; redraws only what changed (EGL buffer age).
+# The HY320F image uses it (SLINT_BACKEND=winit-skia-opengl).
+gpu-skia = ["slint/renderer-skia-opengl"]
 
 [dependencies]
 slint.workspace = true
@@ -78,6 +85,9 @@ calloop = { version = "0.14.5", optional = true }
 reis = { version = "0.7.1", features = ["calloop"], optional = true }
 enumflags2 = { version = "0.7.12", optional = true }
 evdev = { version = "0.13.2", default-features = false, optional = true }
+# Reads `pw-dump` to mute kept-running apps in the background
+# (src/linux/audio.rs). Already in the tree via rusttv-remote.
+serde_json = { workspace = true, optional = true }
 
 # On the TV: the Android backend (always renders with Skia) and the JNI bridge.
 [target.'cfg(target_os = "android")'.dependencies]

@@ -558,3 +558,12 @@ msgstr "{} 연결됨"
 msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "컴퓨터가 변경 {n}개를 적용함"
+
+msgid "Reset"
+msgstr "초기화"
+
+msgid "Done"
+msgstr "완료"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "격자의 가장자리가 곧아질 때까지 각 모서리를 옮기세요. 화살표로 표시된 모서리를 옮기고, OK를 누르면 다음 모서리로 넘어갑니다. 포인터로 모서리를 끌어도 됩니다."

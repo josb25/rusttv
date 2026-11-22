@@ -562,3 +562,12 @@ msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "Je computer heeft {n} wijziging doorgevoerd"
 msgstr[1] "Je computer heeft {n} wijzigingen doorgevoerd"
+
+msgid "Reset"
+msgstr "Herstellen"
+
+msgid "Done"
+msgstr "Klaar"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Verschuif elke hoek tot de randen van het raster recht zijn. De pijltjes verschuiven de gemarkeerde hoek, OK gaat naar de volgende. Of sleep een hoek met de aanwijzer."

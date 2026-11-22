@@ -17,6 +17,7 @@ use super::{
     AboutListRow, Controller, HistoryListRow, HistoryPanel, HomeWindow, ReviewLine, SettingsRow,
     Strings,
 };
+use crate::corners::CornerEdit;
 use crate::history::History;
 use crate::model::Input;
 use crate::order_file;
@@ -292,6 +293,16 @@ impl Controller {
                 title,
                 secret,
             }) => self.ask_text(tab, control, title, secret),
+            Some(Action::AskCorners {
+                tab,
+                control,
+                title,
+                points,
+                size,
+            }) => {
+                self.corners = Some(CornerEdit::new(tab, control, title, points, size));
+                self.corners_status.clear();
+            }
             Some(Action::Update) => self.update_action(),
             Some(Action::Notices) => {
                 let effect = self.home.open_about();

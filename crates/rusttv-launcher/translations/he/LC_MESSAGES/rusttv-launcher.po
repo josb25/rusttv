@@ -562,3 +562,12 @@ msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "המחשב החיל שינוי אחד"
 msgstr[1] "המחשב החיל {n} שינויים"
+
+msgid "Reset"
+msgstr "איפוס"
+
+msgid "Done"
+msgstr "סיום"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "הזיזו כל פינה עד שקצוות הרשת ישרים. החצים מזיזים את הפינה המסומנת, ו-OK עובר לפינה הבאה. או גררו פינה עם הסמן."

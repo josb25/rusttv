@@ -558,3 +558,12 @@ msgstr "{} terhubung"
 msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "Komputer menerapkan {n} perubahan"
+
+msgid "Reset"
+msgstr "Atur ulang"
+
+msgid "Done"
+msgstr "Selesai"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Geser setiap sudut sampai tepi kisi lurus. Tombol panah menggeser sudut yang ditandai, OK pindah ke sudut berikutnya. Atau seret sudut dengan penunjuk."

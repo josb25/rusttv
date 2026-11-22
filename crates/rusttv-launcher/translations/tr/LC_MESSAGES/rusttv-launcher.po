@@ -562,3 +562,12 @@ msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "Bilgisayar {n} değişikliği uyguladı"
 msgstr[1] "Bilgisayar {n} değişikliği uyguladı"
+
+msgid "Reset"
+msgstr "Sıfırla"
+
+msgid "Done"
+msgstr "Bitti"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Izgaranın kenarları düz olana kadar her köşeyi kaydırın. Oklar işaretli köşeyi kaydırır, OK sonraki köşeye geçer. Ya da bir köşeyi işaretçiyle sürükleyin."

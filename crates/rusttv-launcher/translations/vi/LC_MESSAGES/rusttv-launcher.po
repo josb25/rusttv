@@ -558,3 +558,12 @@ msgstr "{} đã kết nối"
 msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "Máy tính đã áp dụng {n} thay đổi"
+
+msgid "Reset"
+msgstr "Đặt lại"
+
+msgid "Done"
+msgstr "Xong"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Di chuyển từng góc cho đến khi các cạnh của lưới thẳng. Các phím mũi tên di chuyển góc được đánh dấu, OK chuyển sang góc tiếp theo. Hoặc kéo một góc bằng con trỏ."

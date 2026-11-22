@@ -562,3 +562,12 @@ msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "Il computer ha applicato {n} modifica"
 msgstr[1] "Il computer ha applicato {n} modifiche"
+
+msgid "Reset"
+msgstr "Ripristina"
+
+msgid "Done"
+msgstr "Fine"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Sposta ogni angolo finché i bordi della griglia non sono dritti. Le frecce spostano l'angolo evidenziato, OK passa al successivo. Oppure trascina un angolo con il puntatore."

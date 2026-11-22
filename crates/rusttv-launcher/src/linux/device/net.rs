@@ -98,7 +98,7 @@ struct Interface {
 
 /// One Info row per fact of each interface, Wi-Fi first; then the
 /// system's DNS servers when no interface named its own.
-pub(super) fn rows() -> Vec<Control> {
+pub(super) fn details() -> Vec<Details> {
     let mut interfaces = read_sysfs(Path::new(SYS_NET));
     if interfaces.is_empty() {
         return Vec::new();
@@ -148,47 +148,52 @@ pub(super) fn rows() -> Vec<Control> {
             interface.wifi = Some(wifi);
         }
     }
-    let mut controls = interface_rows(&interfaces);
+    // Without resolved, the system's DNS servers count for every
+    // connected interface.
     if interfaces.iter().all(|interface| interface.dns.is_empty()) {
         let system = parse_resolv_conf(&read("/etc/resolv.conf"));
-        if !system.is_empty() {
-            controls.push(info("net-dns", "DNS servers", &join(&system)));
+        for interface in &mut interfaces {
+            if interface.carrier == Some(true) {
+                interface.dns.clone_from(&system);
+            }
         }
     }
-    controls
+    interface_details(&interfaces)
 }
 
-/// The rows of `interfaces`: a heading row (name; kind and state), then
-/// one row per fact, labelled with the interface's kind (its name when
-/// two share a kind).
-fn interface_rows(interfaces: &[Interface]) -> Vec<Control> {
-    let mut controls = Vec::new();
-    for interface in interfaces {
-        let shared = interfaces
-            .iter()
-            .filter(|other| other.kind == interface.kind)
-            .count()
-            > 1;
-        let prefix = if shared {
-            interface.name.as_str()
-        } else {
-            interface.kind.name()
-        };
-        let id = format!("net:{}", interface.name);
-        controls.push(info(
-            &id,
-            &interface.name,
-            &format!("{} · {}", interface.kind.name(), state(interface)),
-        ));
-        for (n, (fact, value)) in facts(interface).into_iter().enumerate() {
-            controls.push(info(
-                &format!("{id}:{n}"),
-                &format!("{prefix} · {fact}"),
-                &value,
-            ));
-        }
-    }
-    controls
+/// A network interface as Settings → Network shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Details {
+    /// Its kernel name (`wlan0`).
+    pub name: String,
+    /// "Wi-Fi", "Ethernet", "USB Ethernet".
+    pub kind: &'static str,
+    pub wifi: bool,
+    /// "Off", "Connected", "No cable", "Not connected".
+    pub state: &'static str,
+    /// One row per fact (IP addresses, signal, frequency, ...).
+    pub facts: Vec<Control>,
+}
+
+/// The details of `interfaces`, one row per fact.
+fn interface_details(interfaces: &[Interface]) -> Vec<Details> {
+    interfaces
+        .iter()
+        .map(|interface| {
+            let id = format!("net:{}", interface.name);
+            Details {
+                name: interface.name.clone(),
+                kind: interface.kind.name(),
+                wifi: interface.kind == Kind::Wifi,
+                state: state(interface),
+                facts: facts(interface)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(n, (fact, value))| info(&format!("{id}:{n}"), fact, &value))
+                    .collect(),
+            }
+        })
+        .collect()
 }
 
 /// "Off", "Connected", "No cable", "Not connected".
@@ -589,8 +594,14 @@ mod tests {
     #[test]
     #[ignore = "reads the machine it runs on"]
     fn this_machine() {
-        for control in rows() {
-            println!("{:<32} {}", control.label, control.detail);
+        for interface in details() {
+            println!(
+                "{} ({}, {})",
+                interface.name, interface.kind, interface.state
+            );
+            for control in interface.facts {
+                println!("  {:<30} {}", control.label, control.detail);
+            }
         }
     }
 
@@ -638,46 +649,75 @@ mod tests {
         usb.duplex = Some("full".to_owned());
         usb.carrier = Some(false);
         usb.up = true;
-        let rows = interface_rows(&[wifi, usb]);
+        let details = interface_details(&[wifi, usb]);
         assert_eq!(
-            labels(&rows),
+            (
+                details[0].name.as_str(),
+                details[0].kind,
+                details[0].wifi,
+                details[0].state
+            ),
+            ("wlan0", "Wi-Fi", true, "Connected")
+        );
+        assert_eq!(
+            labels(&details[0].facts),
             [
-                ("wlan0", "Wi-Fi · Connected"),
-                ("Wi-Fi · Network", "Home"),
-                ("Wi-Fi · Access point", "AA:BB:CC:DD:EE:FF"),
-                ("Wi-Fi · Signal", "-49 dBm · 61 %"),
-                ("Wi-Fi · Frequency", "5180 MHz · 5 GHz · channel 36"),
-                ("Wi-Fi · Bitrate", "286.7 Mbit/s down · 258 Mbit/s up"),
-                ("Wi-Fi · IPv4", "192.168.1.125/24"),
-                ("Wi-Fi · IPv6", "fe80::acae:e667:8efa:5646/64 · link-local"),
-                ("Wi-Fi · Gateway", "192.168.1.1"),
-                ("Wi-Fi · DNS servers", "192.168.1.1, fd00::1"),
-                ("Wi-Fi · MAC address", "f8:e4:3b:9d:44:63"),
-                ("Wi-Fi · MTU", "1500"),
-                ("Wi-Fi · Received / sent", "1.2 MB / 999 B"),
-                ("enx1", "USB Ethernet · No cable"),
-                ("USB Ethernet · Link speed", "100 Mbit/s · full duplex"),
-                ("USB Ethernet · MAC address", "f8:e4:3b:9d:44:63"),
-                ("USB Ethernet · MTU", "1500"),
-                ("USB Ethernet · Received / sent", "1.2 MB / 999 B"),
-                ("USB Ethernet · Driver", "r8152"),
+                ("Network", "Home"),
+                ("Access point", "AA:BB:CC:DD:EE:FF"),
+                ("Signal", "-49 dBm · 61 %"),
+                ("Frequency", "5180 MHz · 5 GHz · channel 36"),
+                ("Bitrate", "286.7 Mbit/s down · 258 Mbit/s up"),
+                ("IPv4", "192.168.1.125/24"),
+                ("IPv6", "fe80::acae:e667:8efa:5646/64 · link-local"),
+                ("Gateway", "192.168.1.1"),
+                ("DNS servers", "192.168.1.1, fd00::1"),
+                ("MAC address", "f8:e4:3b:9d:44:63"),
+                ("MTU", "1500"),
+                ("Received / sent", "1.2 MB / 999 B"),
             ]
         );
-        let mut ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            (
+                details[1].name.as_str(),
+                details[1].kind,
+                details[1].wifi,
+                details[1].state
+            ),
+            ("enx1", "USB Ethernet", false, "No cable")
+        );
+        assert_eq!(
+            labels(&details[1].facts),
+            [
+                ("Link speed", "100 Mbit/s · full duplex"),
+                ("MAC address", "f8:e4:3b:9d:44:63"),
+                ("MTU", "1500"),
+                ("Received / sent", "1.2 MB / 999 B"),
+                ("Driver", "r8152"),
+            ]
+        );
+        let mut ids: Vec<&str> = details
+            .iter()
+            .flat_map(|interface| interface.facts.iter().map(|row| row.id.as_str()))
+            .collect();
+        let count = ids.len();
         ids.sort_unstable();
         ids.dedup();
-        assert_eq!(ids.len(), rows.len(), "ids are unique");
-        assert!(rows.iter().all(|row| row.kind == ControlKind::Info));
+        assert_eq!(ids.len(), count, "ids are unique");
+        assert!(
+            details
+                .iter()
+                .flat_map(|interface| &interface.facts)
+                .all(|row| row.kind == ControlKind::Info)
+        );
     }
 
     #[test]
-    fn two_interfaces_of_a_kind_are_told_apart_by_name() {
+    fn an_interface_that_is_off_says_so() {
         let mut off = interface("eth1", Kind::Ethernet);
         off.up = false;
-        let rows = interface_rows(&[interface("eth0", Kind::Ethernet), off]);
-        let labels = labels(&rows);
-        assert!(labels.contains(&("eth0 · MTU", "1500")));
-        assert!(labels.contains(&("eth1", "Ethernet · Off")));
+        let details = interface_details(&[interface("eth0", Kind::Ethernet), off]);
+        assert_eq!(details[1].state, "Off");
+        assert!(labels(&details[0].facts).contains(&("MTU", "1500")));
     }
 
     #[test]

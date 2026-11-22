@@ -46,7 +46,7 @@ const TOP: f32 = 60.0;
 const PAD: f32 = 40.0;
 const WIDTH: u32 = (BAR_W + 2.0 * PAD) as u32;
 const HEIGHT: u32 = (BAR_H + 2.0 * PAD) as u32;
-/// `Colours` in ui/quick.slint: the surface at 95 %, the accent, the
+/// `Theme` in ui/theme.slint: the surface at 95 %, the accent, the
 /// track (#FFFFFF26), and the shadow (#00000080, blurred 32).
 const BAR: [u8; 4] = [0x1C, 0x1F, 0x26, 0xF2];
 const ACCENT: [u8; 4] = [0xF5, 0xA5, 0x24, 0xFF];

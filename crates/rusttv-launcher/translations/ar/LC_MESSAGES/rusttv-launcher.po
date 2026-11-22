@@ -578,3 +578,12 @@ msgstr[2] "طبّق الكمبيوتر تغييرين"
 msgstr[3] "طبّق الكمبيوتر {n} تغييرات"
 msgstr[4] "طبّق الكمبيوتر {n} تغييرًا"
 msgstr[5] "طبّق الكمبيوتر {n} تغيير"
+
+msgid "Reset"
+msgstr "إعادة الضبط"
+
+msgid "Done"
+msgstr "تم"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "حرّك كل زاوية حتى تصبح حواف الشبكة مستقيمة. تحرّك الأسهم الزاوية المحددة، وينتقل OK إلى الزاوية التالية. أو اسحب زاوية بالمؤشر."

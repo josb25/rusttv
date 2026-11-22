@@ -29,7 +29,7 @@ import { AboutAmbient } from "about_ambient.slint";
 import { RemoteAmbient } from "remote_ambient.slint";
 import { HistoryAmbient } from "history_ambient.slint";
 import { MenuRow } from "blocks.slint";
-import { SettingsRow, ControlRow, QuickBar, QuickPanel, PowerMenu, TextPromptView, VolumeOsd } from "quick.slint";
+import { SettingsRow, ControlRow, QuickBar, QuickPanel, PowerMenu, TextPromptView, VolumeOsd, CornersView } from "quick.slint";
 
 // The hero backdrop: a dark base and a soft glow of the app's main colour
 // (platform.rs `Glow`); x and y place the glow, 0..1 of the screen.
@@ -1053,6 +1053,8 @@ export component HomeWindow inherits Window {
     // codes, the focused one (-1: focus is on the tiles).
     in property <[int]> quick-actions;
     in property <int> quick-selected: -1;
+    // The name of the device's video input entry (QuickAction::Input).
+    in property <string> input-label;
     // The open quick panel (mode quick): its title, status line, rows, the
     // focused row and the first row shown.
     in property <string> quick-title;
@@ -1075,6 +1077,15 @@ export component HomeWindow inherits Window {
     in-out property <string> prompt-text;
     callback prompt-done(string);
     callback prompt-cancelled();
+    // The full-screen keystone view (quick.slint `CornersView`,
+    // ui/corners_view.rs).
+    in property <bool> corners-shown;
+    in property <string> corners-title;
+    in property <int> corners-focus;
+    in property <[string]> corners-offsets;
+    in property <string> corners-status;
+    callback corners-pointer(int, float, float);
+    callback corners-button(bool, bool);
     // The volume bar (ui/device_view.rs `show_volume`).
     in property <bool> volume-shown;
     in property <float> volume-level;
@@ -1225,6 +1236,7 @@ export component HomeWindow inherits Window {
         actions: quick-actions;
         selected: quick-selected;
         links: network-icons;
+        input-label: root.input-label;
         opacity: shelf ? 1 : 0;
         visible: self.opacity > 0;
         animate opacity { duration: 250ms; }
@@ -1787,6 +1799,7 @@ export component HomeWindow inherits Window {
                     dim: row.dim;
                     slider: row.slider;
                     level: row.level;
+                    heading: row.heading;
                     selected: i == settings-row;
                     visible: i >= settings-first-row;
                 }
@@ -2140,6 +2153,20 @@ export component HomeWindow inherits Window {
         lines: ambient-lines;
         drift: ambient-drift;
         woken => { root.ambient-woken(); }
+    }
+
+    // The keystone view, over everything but the volume bar.
+    if corners-shown: CornersView {
+        width: root.width;
+        height: root.height;
+        u: root.u;
+        title: corners-title;
+        marked: corners-focus;
+        offsets: corners-offsets;
+        status: corners-status;
+        pointer-shown: Pointer.shown;
+        pointer(action, x, y) => { root.corners-pointer(action, x, y); }
+        button(done, clicked) => { root.corners-button(done, clicked); }
     }
 
     // The volume bar, over everything (ui/device_view.rs).

@@ -8,6 +8,7 @@
 
 #[cfg(target_os = "android")]
 mod android;
+mod corners;
 mod device;
 mod history;
 mod i18n;

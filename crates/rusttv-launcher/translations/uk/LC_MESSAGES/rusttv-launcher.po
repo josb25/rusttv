@@ -566,3 +566,12 @@ msgid_plural "Your computer applied {n} changes"
 msgstr[0] "Ваш комп’ютер застосував {n} зміну"
 msgstr[1] "Ваш комп’ютер застосував {n} зміни"
 msgstr[2] "Ваш комп’ютер застосував {n} змін"
+
+msgid "Reset"
+msgstr "Скинути"
+
+msgid "Done"
+msgstr "Готово"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Зсувайте кожен кут, доки краї сітки не стануть прямими. Стрілки рухають позначений кут, OK переходить до наступного. Або перетягніть кут вказівником."

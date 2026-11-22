@@ -558,3 +558,12 @@ msgstr "{} が接続しました"
 msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "パソコンが {n} 件の変更を適用しました"
+
+msgid "Reset"
+msgstr "リセット"
+
+msgid "Done"
+msgstr "完了"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "グリッドの端がまっすぐになるまで各隅を動かします。矢印キーで選択中の隅を動かし、OKで次の隅に進みます。ポインターで隅をドラッグすることもできます。"

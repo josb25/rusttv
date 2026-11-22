@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use rusttv_history::door::{ApprovedChange, PendingApproval};
 use rusttv_history::{Author, Change, EntryId, Launcher};
 
-use crate::device::{Adjust, ControlKind, Tab, Value, adjust};
+use crate::device::{Adjust, Control, ControlKind, Tab, Value, adjust, settle_row, step_row};
 use crate::model::Input;
 
 /// What the history thread knows when the page opens.
@@ -107,6 +107,15 @@ pub(crate) enum Action {
         control: String,
         title: String,
         secret: bool,
+    },
+    /// Open the full-screen view of a [`ControlKind::Corners`]
+    /// (corners.rs), which sends its points to the device as it goes.
+    AskCorners {
+        tab: String,
+        control: String,
+        title: String,
+        points: [i32; 8],
+        size: [i32; 2],
     },
     /// Install the available launcher update, else check for one.
     Update,
@@ -210,11 +219,7 @@ impl SettingsPage {
             return false;
         };
         self.section = section;
-        self.focus = if self.rows() > 0 {
-            Focus::Panel(0)
-        } else {
-            Focus::List
-        };
+        self.focus = self.settle(0).map_or(Focus::List, Focus::Panel);
         true
     }
 
@@ -267,9 +272,10 @@ impl SettingsPage {
             .iter()
             .position(|known| *known == section)
             .unwrap_or_else(|| self.section.min(sections.len() - 1));
-        let rows = self.rows();
         self.focus = match self.focus {
-            Focus::Panel(row) if rows > 0 => Focus::Panel(row.min(rows - 1)),
+            Focus::Panel(row) if self.settle(row).is_some() => {
+                Focus::Panel(self.settle(row).unwrap_or(row))
+            }
             Focus::Detail(entry) if entry < self.overview.entries.len() => Focus::Detail(entry),
             _ => Focus::List,
         };
@@ -328,7 +334,7 @@ impl SettingsPage {
 
     /// The pointer is over row `row` of the panel: it has focus.
     pub fn point_row(&mut self, row: usize) {
-        if row < self.rows() && !matches!(self.focus, Focus::Detail(_)) {
+        if row < self.rows() && self.selectable(row) && !matches!(self.focus, Focus::Detail(_)) {
             self.focus = Focus::Panel(row);
         }
     }
@@ -360,11 +366,40 @@ impl SettingsPage {
             Section::Effects => usize::from(self.overview.launcher.reduced_effects),
             Section::Ambient => usize::from(self.overview.launcher.ambient_off),
             Section::Updates => usize::from(!self.overview.launcher.update_check),
-            Section::History
-            | Section::Waiting
-            | Section::Remote
-            | Section::Tab(_)
-            | Section::About => 0,
+            Section::Tab(_) => self.settle(0).unwrap_or(0),
+            Section::History | Section::Waiting | Section::Remote | Section::About => 0,
+        }
+    }
+
+    /// The platform tab's controls, while one is selected.
+    fn tab_controls(&self) -> Option<&[Control]> {
+        match self.section() {
+            Section::Tab(tab) => self.tabs.get(tab).map(|tab| &tab.controls[..]),
+            _ => None,
+        }
+    }
+
+    /// Whether focus can rest on `row` (not on a platform tab's heading).
+    fn selectable(&self, row: usize) -> bool {
+        self.tab_controls()
+            .is_none_or(|controls| controls.get(row).is_some_and(Control::selectable))
+    }
+
+    /// Where focus rests near `row` in the selected section; `None` when
+    /// it has no row to rest on.
+    fn settle(&self, row: usize) -> Option<usize> {
+        match self.tab_controls() {
+            Some(controls) => settle_row(controls, row),
+            None => (self.rows() > 0).then(|| row.min(self.rows() - 1)),
+        }
+    }
+
+    /// The row after `row` (`down`) or before it that focus can rest on.
+    fn step(&self, row: usize, down: bool) -> usize {
+        match self.tab_controls() {
+            Some(controls) => step_row(controls, row, down),
+            None if down => (row + 1).min(self.rows().saturating_sub(1)),
+            None => row.saturating_sub(1),
         }
     }
 
@@ -391,8 +426,10 @@ impl SettingsPage {
             Focus::List => match input {
                 Input::Up => self.section = self.section.saturating_sub(1),
                 Input::Down => self.section = (self.section + 1).min(self.sections().len() - 1),
-                Input::OkReleased if self.rows() > 0 => self.focus = Focus::Panel(self.entry_row()),
-                input if input == toward_panel && self.rows() > 0 => {
+                Input::OkReleased if self.settle(0).is_some() => {
+                    self.focus = Focus::Panel(self.entry_row());
+                }
+                input if input == toward_panel && self.settle(0).is_some() => {
                     self.focus = Focus::Panel(self.entry_row());
                 }
                 Input::Back => return Some(Action::Close),
@@ -405,8 +442,8 @@ impl SettingsPage {
                     return action;
                 }
                 match input {
-                    Input::Up => self.focus = Focus::Panel(row.saturating_sub(1)),
-                    Input::Down => self.focus = Focus::Panel((row + 1).min(self.rows() - 1)),
+                    Input::Up => self.focus = Focus::Panel(self.step(row, false)),
+                    Input::Down => self.focus = Focus::Panel(self.step(row, true)),
                     Input::Back => self.focus = Focus::List,
                     input if input == toward_list => self.focus = Focus::List,
                     Input::OkReleased => return self.activate(row),
@@ -448,6 +485,16 @@ impl SettingsPage {
                 title: control.label.clone(),
                 secret: matches!(control.kind, ControlKind::Text { secret: true }),
             })),
+            Adjust::AskCorners => match control.kind {
+                ControlKind::Corners { points, size } => Some(Some(Action::AskCorners {
+                    tab: tab.id.clone(),
+                    control: control.id.clone(),
+                    title: control.label.clone(),
+                    points,
+                    size,
+                })),
+                _ => Some(None),
+            },
         }
     }
 

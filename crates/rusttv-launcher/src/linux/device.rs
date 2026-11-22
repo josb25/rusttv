@@ -2,7 +2,8 @@
 //! tools, each only where it is installed: `wpctl` (PipeWire/WirePlumber)
 //! for audio, `nmcli` (NetworkManager) for networks, `bluetoothctl` for
 //! Bluetooth and `systemctl` to restart or power off. Facts for About come
-//! from `/etc/os-release`, `/proc` and `/sys`.
+//! from `/etc/os-release`, `/proc` and `/sys`. A device's own controls (a
+//! projector's lens focus) come from its device files (`device_file`).
 //!
 //! Every method blocks on a tool (at most [`TOOL_TIMEOUT`]); the launcher
 //! calls them on worker threads only.
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 
 mod net;
 
+use super::device_file::{self, DeviceControls, Input, SideRow};
 use super::program_exists;
 use crate::device::{
     Control, ControlKind, DeviceSettings, Link, QuickPanel, Tab, Value, Volume, VolumeChange,
@@ -32,13 +34,26 @@ const VOLUME_STEP: u32 = 5;
 /// The most Wi-Fi networks a panel lists (strongest first).
 const MAX_NETWORKS: usize = 8;
 
-/// Control ids of Wi-Fi networks are this prefix and the SSID.
+/// Control ids are a prefix and the SSID, interface or device address.
+/// Connects to a Wi-Fi network (or asks for its password first).
 const CONNECT: &str = "connect:";
-
-/// Control ids of paired Bluetooth devices: this prefix and the address.
+/// The connected or a saved Wi-Fi network: OK shows or hides its details
+/// and actions.
+const WIFI: &str = "wifi:";
+const DISCONNECT: &str = "disconnect:";
+/// Deletes a saved Wi-Fi network.
+const FORGET: &str = "forget:";
+/// A wired interface's connection: OK shows or hides its details.
+const WIRED: &str = "wired:";
+/// A wired interface's switch.
+const WIRED_SWITCH: &str = "wired-on:";
+/// A paired Bluetooth device: OK shows or hides its details and actions.
 const BT: &str = "bt:";
-
-/// Control ids of found, unpaired Bluetooth devices.
+const BT_CONNECT: &str = "bt-connect:";
+const BT_DISCONNECT: &str = "bt-disconnect:";
+/// Removes a paired Bluetooth device.
+const BT_FORGET: &str = "bt-forget:";
+/// Pairs with a device found nearby.
 const PAIR: &str = "pair:";
 
 /// How long a Bluetooth search runs, in seconds.
@@ -109,6 +124,13 @@ pub struct LinuxDevice {
     other_os: Option<OtherOs>,
     /// Whether a Bluetooth search ran: Devices then lists what it found.
     scanned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The device's own controls, from its device files.
+    controls: std::sync::Arc<DeviceControls>,
+    /// The row whose details and actions show (a network, an interface, a
+    /// Bluetooth device), by control id.
+    open: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// The name typed into Add network, waiting for its password.
+    hidden: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl LinuxDevice {
@@ -121,7 +143,61 @@ impl LinuxDevice {
             systemctl: program_exists("systemctl"),
             other_os: read_root_only(OTHER_OS).and_then(|text| parse_other_os(&text)),
             scanned: std::sync::Arc::default(),
+            controls: std::sync::Arc::new(DeviceControls::load(
+                Path::new(device_file::DIR),
+                super::ui_language(),
+            )),
+            open: std::sync::Arc::default(),
+            hidden: std::sync::Arc::default(),
         }
+    }
+
+    fn open_row(&self) -> Option<String> {
+        self.open.lock().ok().and_then(|open| open.clone())
+    }
+
+    /// Shows the details of row `id`, or hides them when they show.
+    fn toggle_open(&self, id: &str) {
+        if let Ok(mut open) = self.open.lock() {
+            *open = if open.as_deref() == Some(id) {
+                None
+            } else {
+                Some(id.to_owned())
+            };
+        }
+    }
+
+    /// Hides the details that show.
+    fn close_open(&self) {
+        if let Ok(mut open) = self.open.lock() {
+            *open = None;
+        }
+    }
+
+    fn hidden_network(&self) -> Option<String> {
+        self.hidden.lock().ok().and_then(|hidden| hidden.clone())
+    }
+
+    fn set_hidden_network(&self, ssid: Option<String>) {
+        if let Ok(mut hidden) = self.hidden.lock() {
+            *hidden = ssid;
+        }
+    }
+
+    /// Whether the device-file control `control` of tab `tab` shows the
+    /// test pattern while it moves.
+    pub(super) fn shows_pattern(&self, tab: &str, control: &str) -> bool {
+        self.controls.pattern(tab, control)
+    }
+
+    /// The device's video input, from its device files.
+    pub(super) fn input(&self) -> Option<Input> {
+        self.controls.input()
+    }
+
+    /// The device-file controls of the side menu over apps.
+    pub(super) fn side_menu(&self) -> Vec<SideRow> {
+        self.controls.side_menu()
     }
 
     /// Whether this panel can be shown (its tool is installed).
@@ -186,69 +262,75 @@ impl LinuxDevice {
         Some(tab(QuickPanel::Audio, "Audio", controls))
     }
 
-    fn network(&self) -> Option<Tab> {
+    /// Network: Wi-Fi (on or off, the connected network, the ones nearby,
+    /// the saved ones, Add network) and the wired interfaces. `interfaces`
+    /// (Settings only) adds each interface's details; without nmcli they
+    /// are all there is.
+    fn network(&self, interfaces: Option<&[net::Details]>) -> Option<Tab> {
+        let interfaces = interfaces.unwrap_or_default();
+        let open = self.open_row();
         if !self.nmcli {
-            return None;
-        }
-        let mut controls = Vec::new();
-        if let Ok(devices) = run("nmcli", &["-t", "-f", "TYPE,STATE,CONNECTION", "device"]) {
-            for fields in devices.lines().map(split_terse) {
-                if let [kind, state, connection] = fields.as_slice()
-                    && kind == "ethernet"
-                    && state == "connected"
-                {
-                    controls.push(control(
-                        "ethernet",
-                        "Ethernet",
-                        connection,
-                        ControlKind::Info,
-                    ));
-                }
+            if interfaces.is_empty() {
+                return None;
             }
-        }
-        let wifi =
-            run("nmcli", &["-t", "-f", "WIFI", "radio"]).is_ok_and(|text| text.trim() == "enabled");
-        controls.push(control(
-            "wifi",
-            "Wi-Fi",
-            "",
-            ControlKind::Toggle { on: wifi },
-        ));
-        if !wifi {
+            let controls = interface_rows(interfaces, &[], open.as_deref());
             return Some(tab(QuickPanel::Network, "Network", controls));
         }
-        let networks = run(
-            "nmcli",
-            &[
-                "-t",
-                "-f",
-                "IN-USE,SSID,SIGNAL,SECURITY",
-                "device",
-                "wifi",
-                "list",
-                "--rescan",
-                "no",
-            ],
-        )
-        .map(|text| parse_networks(&text))
-        .unwrap_or_default();
-        let saved = run("nmcli", &["-t", "-f", "NAME,TYPE", "connection", "show"])
-            .map(|text| parse_saved(&text))
+        let on =
+            run("nmcli", &["-t", "-f", "WIFI", "radio"]).is_ok_and(|text| text.trim() == "enabled");
+        let wifi = if on {
+            let networks = run(
+                "nmcli",
+                &[
+                    "-t",
+                    "-f",
+                    "IN-USE,SSID,SIGNAL,SECURITY",
+                    "device",
+                    "wifi",
+                    "list",
+                    "--rescan",
+                    "no",
+                ],
+            )
+            .map(|text| parse_networks(&text))
             .unwrap_or_default();
-        for network in &networks {
-            controls.push(network_control(network, saved.contains(&network.ssid)));
-        }
-        controls.push(control(
-            "rescan",
-            "Search for networks",
-            "",
-            ControlKind::Action,
-        ));
+            let saved = run("nmcli", &["-t", "-f", "NAME,TYPE", "connection", "show"])
+                .map(|text| parse_saved(&text))
+                .unwrap_or_default();
+            WifiState {
+                on,
+                networks,
+                saved,
+                details: interfaces
+                    .iter()
+                    .find(|interface| interface.wifi && interface.state == "Connected")
+                    .map(|interface| interface.facts.clone())
+                    .unwrap_or_default(),
+                open: open.clone(),
+                hidden: self.hidden_network(),
+            }
+        } else {
+            WifiState::default()
+        };
+        let mut controls = wifi_rows(&wifi);
+        let wired: Vec<net::Details> = interfaces
+            .iter()
+            .filter(|interface| !interface.wifi)
+            .cloned()
+            .collect();
+        let states = run(
+            "nmcli",
+            &["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"],
+        )
+        .map(|text| parse_wired(&text))
+        .unwrap_or_default();
+        controls.extend(interface_rows(&wired, &states, open.as_deref()));
         Some(tab(QuickPanel::Network, "Network", controls))
     }
 
-    /// Bluetooth: on or off, the paired devices (OK connects or
-    /// disconnects one), and after a search the new ones nearby (OK pairs).
+    /// Bluetooth: on or off, the connected and the paired devices (OK
+    /// shows a device's details and actions), the ones found nearby (OK
+    /// pairs) and Search.
     fn devices(&self) -> Option<Tab> {
         if !self.bluetoothctl {
             return None;
@@ -256,56 +338,39 @@ impl LinuxDevice {
         let on = run("bluetoothctl", &["show"])
             .ok()
             .and_then(|text| parse_powered(&text))?;
-        let mut controls = vec![control(
-            "bluetooth",
-            "Bluetooth",
-            "",
-            ControlKind::Toggle { on },
-        )];
+        let mut state = BluetoothState {
+            on,
+            open: self.open_row(),
+            ..BluetoothState::default()
+        };
         if on {
             let list = |filter: &str| {
                 run("bluetoothctl", &["devices", filter])
                     .map(|text| parse_bt_devices(&text))
                     .unwrap_or_default()
             };
-            let paired = list("Paired");
-            let connected = list("Connected");
-            for (address, name) in &paired {
-                let up = connected.iter().any(|(other, _)| other == address);
-                controls.push(control(
-                    &format!("{BT}{address}"),
-                    name,
-                    if up { "Connected" } else { "Not connected" },
-                    ControlKind::Action,
-                ));
-            }
+            state.paired = list("Paired");
+            state.connected = list("Connected")
+                .into_iter()
+                .map(|(address, _)| address)
+                .collect();
             if self.scanned.load(std::sync::atomic::Ordering::Relaxed) {
-                let all = run("bluetoothctl", &["devices"])
-                    .map(|text| parse_bt_devices(&text))
-                    .unwrap_or_default();
-                for (address, name) in all
-                    .iter()
-                    .filter(|(address, _)| !paired.iter().any(|(other, _)| other == address))
-                {
-                    controls.push(control(
-                        &format!("{PAIR}{address}"),
-                        name,
-                        "New",
-                        ControlKind::Action,
-                    ));
-                }
+                state.found = Some(
+                    run("bluetoothctl", &["devices"])
+                        .map(|text| parse_bt_devices(&text))
+                        .unwrap_or_default(),
+                );
             }
-            controls.push(control(
-                "bt-scan",
-                "Search for devices",
-                "",
-                ControlKind::Action,
-            ));
+            if let Some(address) = state.open.as_deref().and_then(|id| id.strip_prefix(BT)) {
+                state.info = run("bluetoothctl", &["info", address])
+                    .map(|text| parse_bt_info(&text))
+                    .unwrap_or_default();
+            }
         }
         Some(Tab {
             id: "devices".to_owned(),
-            title: "Devices".to_owned(),
-            controls,
+            title: "Bluetooth".to_owned(),
+            controls: bluetooth_rows(&state),
         })
     }
 
@@ -329,30 +394,32 @@ impl DeviceSettings for LinuxDevice {
             "Sound".clone_into(&mut audio.title);
             tabs.push(audio);
         }
-        // Settings' Network tab also shows each interface's details (not
+        // Settings' Network tab also has each interface's details (not
         // the quick panel); it is there without nmcli too.
-        let interfaces = net::rows();
-        let mut network = self.network();
-        if !interfaces.is_empty() {
-            network
-                .get_or_insert_with(|| tab(QuickPanel::Network, "Network", Vec::new()))
-                .controls
-                .extend(interfaces);
-        }
-        tabs.extend(network);
+        tabs.extend(self.network(Some(&net::details())));
         tabs.extend(self.devices());
+        tabs.extend(self.controls.tabs(|command| {
+            let (program, args) = command.split_first()?;
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            run(program, &args).ok()
+        }));
         tabs
     }
 
     fn panel(&self, panel: QuickPanel) -> Option<Tab> {
         match panel {
             QuickPanel::Audio => self.audio(),
-            QuickPanel::Network => self.network(),
+            QuickPanel::Network => self.network(None),
             QuickPanel::Power => self.power(),
         }
     }
 
-    fn set(&self, _tab: &str, control: &str, value: Value) -> Result<(), String> {
+    fn set(&self, tab: &str, control: &str, value: Value) -> Result<(), String> {
+        if let Some(command) = self.controls.command(tab, control, &value) {
+            let (program, args) = command.split_first().ok_or("no command")?;
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            return run(program, &args).map(drop);
+        }
         let on_off = |on: bool| if on { "on" } else { "off" };
         match (control, value) {
             ("volume", Value::Number(level)) => run(
@@ -368,12 +435,35 @@ impl DeviceSettings for LinuxDevice {
                 run("wpctl", &["set-default", &sink.id.to_string()])
             }
             ("wifi", Value::Toggle(on)) => run("nmcli", &["radio", "wifi", on_off(on)]),
+            (control, Value::Toggle(on)) if control.starts_with(WIRED_SWITCH) => {
+                let device = &control[WIRED_SWITCH.len()..];
+                if on {
+                    // Without a cable there is nothing to connect yet; it
+                    // connects by itself once one is plugged in.
+                    run("nmcli", &["device", "set", device, "autoconnect", "yes"])?;
+                    run("nmcli", &["device", "connect", device]).or(Ok(String::new()))
+                } else {
+                    run("nmcli", &["device", "disconnect", device])
+                }
+            }
             ("bluetooth", Value::Toggle(on)) => run("bluetoothctl", &["power", on_off(on)]),
+            (control, Value::Action)
+                if control.starts_with(WIFI)
+                    || control.starts_with(WIRED)
+                    || control.starts_with(BT) =>
+            {
+                self.toggle_open(control);
+                Ok(String::new())
+            }
             (control, Value::Action) if control.starts_with(CONNECT) => {
                 let ssid = &control[CONNECT.len()..];
                 // A saved network first; else a new, open one.
-                run("nmcli", &["connection", "up", "id", ssid])
-                    .or_else(|_| run("nmcli", &["device", "wifi", "connect", ssid]))
+                let connected = run("nmcli", &["connection", "up", "id", ssid])
+                    .or_else(|_| run("nmcli", &["device", "wifi", "connect", ssid]));
+                if connected.is_ok() {
+                    self.close_open();
+                }
+                connected
             }
             (control, Value::Text(password)) if control.starts_with(CONNECT) => {
                 let ssid = &control[CONNECT.len()..];
@@ -383,6 +473,53 @@ impl DeviceSettings for LinuxDevice {
                     &["--ask", "device", "wifi", "connect", ssid],
                     Some(&password),
                 )
+            }
+            (control, Value::Action) if control.starts_with(DISCONNECT) => run(
+                "nmcli",
+                &["connection", "down", "id", &control[DISCONNECT.len()..]],
+            ),
+            (control, Value::Action) if control.starts_with(FORGET) => {
+                let forgot = run(
+                    "nmcli",
+                    &["connection", "delete", "id", &control[FORGET.len()..]],
+                );
+                self.close_open();
+                forgot
+            }
+            ("add-network", Value::Text(ssid)) => {
+                let ssid = ssid.trim();
+                if ssid.is_empty() {
+                    return Err("no network name".to_owned());
+                }
+                self.set_hidden_network(Some(ssid.to_owned()));
+                Ok(String::new())
+            }
+            ("add-password", Value::Text(password)) => {
+                let ssid = self.hidden_network().ok_or("no network name")?;
+                let connected = run_with_input(
+                    "nmcli",
+                    &["--ask", "device", "wifi", "connect", &ssid, "hidden", "yes"],
+                    Some(&password),
+                );
+                if connected.is_ok() {
+                    self.set_hidden_network(None);
+                }
+                connected
+            }
+            ("add-open", Value::Action) => {
+                let ssid = self.hidden_network().ok_or("no network name")?;
+                let connected = run(
+                    "nmcli",
+                    &["device", "wifi", "connect", &ssid, "hidden", "yes"],
+                );
+                if connected.is_ok() {
+                    self.set_hidden_network(None);
+                }
+                connected
+            }
+            ("add-cancel", Value::Action) => {
+                self.set_hidden_network(None);
+                Ok(String::new())
             }
             ("rescan", Value::Action) => run(
                 "nmcli",
@@ -399,14 +536,22 @@ impl DeviceSettings for LinuxDevice {
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 scanned
             }
-            (control, Value::Action) if control.starts_with(BT) => {
-                let address = bt_address(&control[BT.len()..]).ok_or("not a Bluetooth address")?;
-                let connected = run("bluetoothctl", &["info", address])
-                    .is_ok_and(|text| text.contains("Connected: yes"));
-                run(
-                    "bluetoothctl",
-                    &[if connected { "disconnect" } else { "connect" }, address],
-                )
+            (control, Value::Action) if control.starts_with(BT_CONNECT) => {
+                let address =
+                    bt_address(&control[BT_CONNECT.len()..]).ok_or("not a Bluetooth address")?;
+                run("bluetoothctl", &["connect", address])
+            }
+            (control, Value::Action) if control.starts_with(BT_DISCONNECT) => {
+                let address = bt_address(&control[BT_DISCONNECT.len()..])
+                    .ok_or("not a Bluetooth address")?;
+                run("bluetoothctl", &["disconnect", address])
+            }
+            (control, Value::Action) if control.starts_with(BT_FORGET) => {
+                let address =
+                    bt_address(&control[BT_FORGET.len()..]).ok_or("not a Bluetooth address")?;
+                let removed = run("bluetoothctl", &["remove", address]);
+                self.close_open();
+                removed
             }
             (control, Value::Action) if control.starts_with(PAIR) => {
                 let address =
@@ -750,29 +895,418 @@ fn parse_networks(text: &str) -> Vec<Network> {
     networks
 }
 
-/// How a Wi-Fi network shows: saved and open ones connect on OK, a new
-/// secured one asks for its password first.
-fn network_control(network: &Network, saved: bool) -> Control {
-    let id = format!("{CONNECT}{}", network.ssid);
-    let open = network.security.is_empty() || network.security == "--";
-    let state = if network.in_use {
-        "Connected"
-    } else if saved {
-        "Saved"
-    } else if open {
+/// What the Wi-Fi rows of the Network tab are built from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct WifiState {
+    on: bool,
+    /// Nearby, strongest first ([`parse_networks`]).
+    networks: Vec<Network>,
+    /// Saved connections' names.
+    saved: Vec<String>,
+    /// The Wi-Fi interface's details while connected.
+    details: Vec<Control>,
+    /// The row whose details show.
+    open: Option<String>,
+    /// The name typed into Add network, waiting for its password.
+    hidden: Option<String>,
+}
+
+/// "WPA2" as nmcli lists it; "Open" for none.
+fn security_text(security: &str) -> &str {
+    if security.is_empty() || security == "--" {
         "Open"
     } else {
-        "Secured"
-    };
-    let detail = format!("{state} · {} %", network.signal);
-    let kind = if network.in_use {
-        ControlKind::Info
-    } else if saved || open {
-        ControlKind::Action
-    } else {
-        ControlKind::Text { secret: true }
-    };
-    control(&id, &network.ssid, &detail, kind)
+        security
+    }
+}
+
+fn heading(id: &str, label: &str) -> Control {
+    control(id, label, "", ControlKind::Heading)
+}
+
+/// The Wi-Fi rows, in the order a connection goes: the switch, the
+/// network in use (OK: its details, Disconnect, Forget), the networks
+/// nearby (OK connects, asking for the password of a secured one), the
+/// saved ones (OK: Connect, Forget), and Add network for one that hides
+/// its name.
+fn wifi_rows(state: &WifiState) -> Vec<Control> {
+    let mut controls = vec![control(
+        "wifi",
+        "Wi-Fi",
+        "",
+        ControlKind::Toggle { on: state.on },
+    )];
+    if !state.on {
+        return controls;
+    }
+    let open = state.open.as_deref();
+    if let Some(current) = state.networks.iter().find(|network| network.in_use) {
+        let id = format!("{WIFI}{}", current.ssid);
+        controls.push(heading("wifi-connected", "Connected"));
+        let shown = open == Some(id.as_str());
+        controls.push(control(
+            &id,
+            &current.ssid,
+            &format!(
+                "Connected · {} % · {}",
+                current.signal,
+                security_text(&current.security)
+            ),
+            ControlKind::Action,
+        ));
+        if shown {
+            controls.extend(
+                state
+                    .details
+                    .iter()
+                    .filter(|fact| fact.label != "Network")
+                    .cloned(),
+            );
+            controls.push(control(
+                &format!("{DISCONNECT}{}", current.ssid),
+                "Disconnect",
+                "",
+                ControlKind::Action,
+            ));
+            controls.push(control(
+                &format!("{FORGET}{}", current.ssid),
+                "Forget network",
+                "",
+                ControlKind::Action,
+            ));
+        }
+    }
+    controls.push(heading("wifi-available", "Available networks"));
+    let mut nearby = 0;
+    for network in state
+        .networks
+        .iter()
+        .filter(|network| !network.in_use && !state.saved.contains(&network.ssid))
+    {
+        nearby += 1;
+        let security = security_text(&network.security);
+        let kind = if security == "Open" {
+            ControlKind::Action
+        } else {
+            ControlKind::Text { secret: true }
+        };
+        controls.push(control(
+            &format!("{CONNECT}{}", network.ssid),
+            &network.ssid,
+            &format!("{security} · {} %", network.signal),
+            kind,
+        ));
+    }
+    if nearby == 0 {
+        controls.push(control(
+            "wifi-none",
+            "No other networks found",
+            "",
+            ControlKind::Info,
+        ));
+    }
+    controls.push(control("rescan", "Search again", "", ControlKind::Action));
+    let saved: Vec<&String> = state
+        .saved
+        .iter()
+        .filter(|name| {
+            !state
+                .networks
+                .iter()
+                .any(|network| network.in_use && &&network.ssid == name)
+        })
+        .collect();
+    if !saved.is_empty() {
+        controls.push(heading("wifi-saved", "Saved networks"));
+    }
+    for name in saved {
+        let id = format!("{WIFI}{name}");
+        let near = state.networks.iter().find(|network| &network.ssid == name);
+        controls.push(control(
+            &id,
+            name,
+            &near.map_or_else(
+                || "Not in range".to_owned(),
+                |network| format!("In range · {} %", network.signal),
+            ),
+            ControlKind::Action,
+        ));
+        if open == Some(id.as_str()) {
+            if near.is_some() {
+                controls.push(control(
+                    &format!("{CONNECT}{name}"),
+                    "Connect",
+                    "",
+                    ControlKind::Action,
+                ));
+            }
+            controls.push(control(
+                &format!("{FORGET}{name}"),
+                "Forget network",
+                "",
+                ControlKind::Action,
+            ));
+        }
+    }
+    match &state.hidden {
+        None => controls.push(control(
+            "add-network",
+            "Add network",
+            "One that doesn't show its name",
+            ControlKind::Text { secret: false },
+        )),
+        Some(ssid) => {
+            controls.push(heading("wifi-add", &format!("Add network “{ssid}”")));
+            controls.push(control(
+                "add-password",
+                "Password",
+                "",
+                ControlKind::Text { secret: true },
+            ));
+            controls.push(control(
+                "add-open",
+                "Connect without password",
+                "",
+                ControlKind::Action,
+            ));
+            controls.push(control("add-cancel", "Cancel", "", ControlKind::Action));
+        }
+    }
+    controls
+}
+
+/// A wired interface as NetworkManager sees it, from
+/// `nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wired {
+    device: String,
+    /// Not switched off ("disconnected" is NetworkManager's off: the
+    /// device doesn't connect by itself until switched on).
+    on: bool,
+    /// The connection's name while connected.
+    connection: Option<String>,
+}
+
+/// The Ethernet devices NetworkManager manages.
+fn parse_wired(text: &str) -> Vec<Wired> {
+    text.lines()
+        .map(split_terse)
+        .filter_map(|fields| match fields.as_slice() {
+            [device, kind, state, connection] if kind == "ethernet" => {
+                let state = state.split_whitespace().next().unwrap_or_default();
+                if state == "unmanaged" {
+                    return None;
+                }
+                Some(Wired {
+                    device: device.clone(),
+                    on: state != "disconnected",
+                    connection: (state == "connected" && !connection.is_empty())
+                        .then(|| connection.clone()),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The wired interfaces, each like Wi-Fi: a heading, its switch (where
+/// NetworkManager manages it, `states`), and while on, its connection
+/// with its state; OK there shows the details.
+fn interface_rows(
+    interfaces: &[net::Details],
+    states: &[Wired],
+    open: Option<&str>,
+) -> Vec<Control> {
+    let mut controls = Vec::new();
+    for interface in interfaces {
+        let title = if interfaces
+            .iter()
+            .filter(|other| other.kind == interface.kind)
+            .count()
+            > 1
+        {
+            format!("{} ({})", interface.kind, interface.name)
+        } else {
+            interface.kind.to_owned()
+        };
+        controls.push(heading(
+            &format!("wired-heading:{}", interface.name),
+            &title,
+        ));
+        let managed = states.iter().find(|state| state.device == interface.name);
+        if let Some(managed) = managed {
+            controls.push(control(
+                &format!("{WIRED_SWITCH}{}", interface.name),
+                interface.kind,
+                "",
+                ControlKind::Toggle { on: managed.on },
+            ));
+            if !managed.on {
+                continue;
+            }
+        }
+        let id = format!("{WIRED}{}", interface.name);
+        let label = managed
+            .and_then(|managed| managed.connection.clone())
+            .unwrap_or_else(|| interface.name.clone());
+        controls.push(control(&id, &label, interface.state, ControlKind::Action));
+        if open == Some(id.as_str()) {
+            controls.extend(interface.facts.iter().cloned());
+        }
+    }
+    controls
+}
+
+/// What the Bluetooth tab is built from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BluetoothState {
+    on: bool,
+    /// (address, name).
+    paired: Vec<(String, String)>,
+    /// Addresses.
+    connected: Vec<String>,
+    /// Every device known after a search, paired ones too; `None` before.
+    found: Option<Vec<(String, String)>>,
+    /// The row whose details show.
+    open: Option<String>,
+    /// Facts about the device whose details show ([`parse_bt_info`]).
+    info: Vec<(String, String)>,
+}
+
+/// The Bluetooth rows: the switch, the connected devices, the paired
+/// ones that aren't (OK on either: its details, Connect or Disconnect,
+/// Forget), the ones found nearby (OK pairs) and Search.
+fn bluetooth_rows(state: &BluetoothState) -> Vec<Control> {
+    let mut controls = vec![control(
+        "bluetooth",
+        "Bluetooth",
+        "",
+        ControlKind::Toggle { on: state.on },
+    )];
+    if !state.on {
+        return controls;
+    }
+    let open = state.open.as_deref();
+    for up in [true, false] {
+        let devices: Vec<&(String, String)> = state
+            .paired
+            .iter()
+            .filter(|(address, _)| state.connected.contains(address) == up)
+            .collect();
+        if devices.is_empty() {
+            continue;
+        }
+        controls.push(if up {
+            heading("bt-connected", "Connected devices")
+        } else {
+            heading("bt-paired", "Paired devices")
+        });
+        for (address, name) in devices {
+            let id = format!("{BT}{address}");
+            controls.push(control(
+                &id,
+                name,
+                if up { "Connected" } else { "Not connected" },
+                ControlKind::Action,
+            ));
+            if open != Some(id.as_str()) {
+                continue;
+            }
+            for (n, (label, value)) in state.info.iter().enumerate() {
+                controls.push(control(
+                    &format!("bt-info:{n}"),
+                    label,
+                    value,
+                    ControlKind::Info,
+                ));
+            }
+            controls.push(control("bt-address", "Address", address, ControlKind::Info));
+            controls.push(if up {
+                control(
+                    &format!("{BT_DISCONNECT}{address}"),
+                    "Disconnect",
+                    "",
+                    ControlKind::Action,
+                )
+            } else {
+                control(
+                    &format!("{BT_CONNECT}{address}"),
+                    "Connect",
+                    "",
+                    ControlKind::Action,
+                )
+            });
+            controls.push(control(
+                &format!("{BT_FORGET}{address}"),
+                "Forget device",
+                "",
+                ControlKind::Action,
+            ));
+        }
+    }
+    controls.push(heading("bt-available", "Available devices"));
+    match &state.found {
+        Some(found) => {
+            let new: Vec<&(String, String)> = found
+                .iter()
+                .filter(|(address, _)| !state.paired.iter().any(|(other, _)| other == address))
+                .collect();
+            if new.is_empty() {
+                controls.push(control(
+                    "bt-none",
+                    "No new devices found",
+                    "",
+                    ControlKind::Info,
+                ));
+            }
+            for (address, name) in new {
+                controls.push(control(
+                    &format!("{PAIR}{address}"),
+                    name,
+                    "Pair",
+                    ControlKind::Action,
+                ));
+            }
+            controls.push(control("bt-scan", "Search again", "", ControlKind::Action));
+        }
+        None => controls.push(control(
+            "bt-scan",
+            "Search for devices",
+            "Puts nothing in pairing mode; do that on the device",
+            ControlKind::Action,
+        )),
+    }
+    controls
+}
+
+/// `bluetoothctl info`: the device's kind and battery, as (label, value).
+fn parse_bt_info(text: &str) -> Vec<(String, String)> {
+    let mut facts = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(icon) = line.strip_prefix("Icon:") {
+            let kind = match icon.trim() {
+                "audio-headset" | "audio-headphones" => "Headphones",
+                "audio-card" => "Speaker",
+                "input-gaming" => "Game controller",
+                "input-keyboard" => "Keyboard",
+                "input-mouse" => "Mouse",
+                "input-tablet" => "Tablet",
+                "phone" => "Phone",
+                "computer" => "Computer",
+                _ => continue,
+            };
+            facts.push(("Type".to_owned(), kind.to_owned()));
+        } else if let Some(battery) = line.strip_prefix("Battery Percentage:") {
+            // "0x64 (100)"
+            if let Some(percent) = battery
+                .split_once('(')
+                .and_then(|(_, rest)| rest.strip_suffix(')'))
+            {
+                facts.push(("Battery".to_owned(), format!("{percent} %")));
+            }
+        }
+    }
+    facts
 }
 
 /// The names of saved Wi-Fi connections, from
@@ -920,40 +1454,254 @@ mod tests {
         assert_eq!(networks[1].security, "");
     }
 
-    #[test]
-    fn new_secured_networks_ask_for_a_password_and_saved_ones_connect() {
-        let saved =
-            parse_saved("Home:802-11-wireless\nWired:802-3-ethernet\nLab\\:2:802-11-wireless\n");
-        assert_eq!(saved, ["Home", "Lab:2"]);
-        let network = |ssid: &str, security: &str, in_use: bool| Network {
+    fn rows(controls: &[Control]) -> Vec<(String, String, String)> {
+        controls
+            .iter()
+            .map(|control| {
+                let kind = match control.kind {
+                    ControlKind::Heading => "heading",
+                    ControlKind::Toggle { .. } => "toggle",
+                    ControlKind::Action => "action",
+                    ControlKind::Text { secret: true } => "password",
+                    ControlKind::Text { secret: false } => "text",
+                    ControlKind::Info => "info",
+                    _ => "other",
+                };
+                (
+                    kind.to_owned(),
+                    control.label.clone(),
+                    control.detail.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn row(kind: &str, label: &str, detail: &str) -> (String, String, String) {
+        (kind.to_owned(), label.to_owned(), detail.to_owned())
+    }
+
+    fn wifi_state() -> WifiState {
+        let network = |ssid: &str, security: &str, in_use: bool, signal: u8| Network {
             in_use,
             ssid: ssid.to_owned(),
-            signal: 70,
+            signal,
             security: security.to_owned(),
         };
-        let kind = |control: Control| (control.detail, control.kind);
+        WifiState {
+            on: true,
+            networks: vec![
+                network("Home", "WPA2", true, 80),
+                network("Office", "WPA2", false, 60),
+                network("Cafe", "", false, 55),
+                network("Next door", "WPA2 WPA3", false, 40),
+            ],
+            saved: parse_saved(
+                "Home:802-11-wireless\nWired:802-3-ethernet\nOffice:802-11-wireless\n\
+                 Holiday:802-11-wireless\n",
+            ),
+            details: vec![
+                control("net:wlan0:0", "Network", "Home", ControlKind::Info),
+                control("net:wlan0:1", "IPv4", "192.168.1.125/24", ControlKind::Info),
+            ],
+            open: None,
+            hidden: None,
+        }
+    }
+
+    #[test]
+    fn wifi_rows_follow_how_a_connection_goes() {
+        let state = wifi_state();
         assert_eq!(
-            kind(network_control(&network("Home", "WPA2", false), true)),
-            ("Saved · 70 %".to_owned(), ControlKind::Action)
+            rows(&wifi_rows(&state)),
+            [
+                row("toggle", "Wi-Fi", ""),
+                row("heading", "Connected", ""),
+                row("action", "Home", "Connected · 80 % · WPA2"),
+                row("heading", "Available networks", ""),
+                row("action", "Cafe", "Open · 55 %"),
+                row("password", "Next door", "WPA2 WPA3 · 40 %"),
+                row("action", "Search again", ""),
+                row("heading", "Saved networks", ""),
+                row("action", "Office", "In range · 60 %"),
+                row("action", "Holiday", "Not in range"),
+                row("text", "Add network", "One that doesn't show its name"),
+            ]
         );
         assert_eq!(
-            kind(network_control(&network("Cafe", "", false), false)),
-            ("Open · 70 %".to_owned(), ControlKind::Action)
+            rows(&wifi_rows(&WifiState::default())),
+            [row("toggle", "Wi-Fi", "")]
+        );
+    }
+
+    #[test]
+    fn ok_on_a_network_shows_its_details_and_actions() {
+        let mut state = wifi_state();
+        state.open = Some(format!("{WIFI}Home"));
+        let controls = wifi_rows(&state);
+        let shown: Vec<_> = rows(&controls)[2..6].to_vec();
+        assert_eq!(
+            shown,
+            [
+                row("action", "Home", "Connected · 80 % · WPA2"),
+                row("info", "IPv4", "192.168.1.125/24"),
+                row("action", "Disconnect", ""),
+                row("action", "Forget network", ""),
+            ]
+        );
+        assert!(controls.iter().any(|c| c.id == format!("{DISCONNECT}Home")));
+        state.open = Some(format!("{WIFI}Holiday"));
+        let controls = wifi_rows(&state);
+        let ids: Vec<&str> = controls.iter().map(|c| c.id.as_str()).collect();
+        assert!(ids.contains(&"forget:Holiday"));
+        assert!(!ids.contains(&"connect:Holiday"), "not in range");
+        state.open = Some(format!("{WIFI}Office"));
+        let ids: Vec<String> = wifi_rows(&state).into_iter().map(|c| c.id).collect();
+        assert!(ids.contains(&"connect:Office".to_owned()));
+    }
+
+    #[test]
+    fn add_network_asks_for_the_name_then_the_password() {
+        let mut state = wifi_state();
+        state.hidden = Some("Attic".to_owned());
+        let controls = rows(&wifi_rows(&state));
+        assert_eq!(
+            controls[controls.len() - 4..],
+            [
+                row("heading", "Add network “Attic”", ""),
+                row("password", "Password", ""),
+                row("action", "Connect without password", ""),
+                row("action", "Cancel", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn control_ids_are_unique() {
+        let mut state = wifi_state();
+        state.open = Some(format!("{WIFI}Home"));
+        let mut controls = wifi_rows(&state);
+        controls.extend(bluetooth_rows(&bluetooth_state()));
+        let mut ids: Vec<&str> = controls.iter().map(|c| c.id.as_str()).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count);
+    }
+
+    fn wired(name: &str, state: &'static str) -> net::Details {
+        net::Details {
+            name: name.to_owned(),
+            kind: "Ethernet",
+            wifi: false,
+            state,
+            facts: vec![control(
+                &format!("net:{name}:0"),
+                "Link speed",
+                "1000 Mbit/s",
+                ControlKind::Info,
+            )],
+        }
+    }
+
+    #[test]
+    fn ethernet_has_a_switch_and_its_connection_like_wifi() {
+        let states = parse_wired(
+            "eth0:ethernet:connected:Wired connection 1\neth1:ethernet:disconnected:\n\
+             usb0:ethernet:unmanaged:\nwlan0:wifi:connected:Home\nlo:loopback:connected (externally):lo\n",
         );
         assert_eq!(
-            kind(network_control(
-                &network("Next door", "WPA2 WPA3", false),
-                false
-            )),
-            (
-                "Secured · 70 %".to_owned(),
-                ControlKind::Text { secret: true }
-            )
+            states,
+            [
+                Wired {
+                    device: "eth0".to_owned(),
+                    on: true,
+                    connection: Some("Wired connection 1".to_owned()),
+                },
+                Wired {
+                    device: "eth1".to_owned(),
+                    on: false,
+                    connection: None,
+                },
+            ]
         );
+        let interfaces = [
+            wired("eth0", "Connected"),
+            wired("eth1", "No cable"),
+            wired("usb0", "Connected"),
+        ];
+        let open = format!("{WIRED}eth0");
         assert_eq!(
-            kind(network_control(&network("Home", "WPA2", true), true)).1,
-            ControlKind::Info
+            rows(&interface_rows(&interfaces, &states, Some(&open))),
+            [
+                row("heading", "Ethernet (eth0)", ""),
+                row("toggle", "Ethernet", ""),
+                row("action", "Wired connection 1", "Connected"),
+                row("info", "Link speed", "1000 Mbit/s"),
+                row("heading", "Ethernet (eth1)", ""),
+                row("toggle", "Ethernet", ""),
+                // Unmanaged: no switch, just its state.
+                row("heading", "Ethernet (usb0)", ""),
+                row("action", "usb0", "Connected"),
+            ]
         );
+    }
+
+    fn bluetooth_state() -> BluetoothState {
+        BluetoothState {
+            on: true,
+            paired: vec![
+                ("AA:AA".to_owned(), "Remote".to_owned()),
+                ("BB:BB".to_owned(), "Headphones".to_owned()),
+            ],
+            connected: vec!["AA:AA".to_owned()],
+            found: None,
+            open: None,
+            info: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn bluetooth_rows_group_connected_paired_and_found_devices() {
+        let mut state = bluetooth_state();
+        assert_eq!(
+            rows(&bluetooth_rows(&state)),
+            [
+                row("toggle", "Bluetooth", ""),
+                row("heading", "Connected devices", ""),
+                row("action", "Remote", "Connected"),
+                row("heading", "Paired devices", ""),
+                row("action", "Headphones", "Not connected"),
+                row("heading", "Available devices", ""),
+                row(
+                    "action",
+                    "Search for devices",
+                    "Puts nothing in pairing mode; do that on the device"
+                ),
+            ]
+        );
+        state.found = Some(vec![
+            ("AA:AA".to_owned(), "Remote".to_owned()),
+            ("CC:CC".to_owned(), "Pad".to_owned()),
+        ]);
+        state.open = Some(format!("{BT}BB:BB"));
+        state.info =
+            parse_bt_info("Device BB:BB\n\tIcon: audio-headset\n\tBattery Percentage: 0x50 (80)\n");
+        assert_eq!(
+            rows(&bluetooth_rows(&state))[4..],
+            [
+                row("action", "Headphones", "Not connected"),
+                row("info", "Type", "Headphones"),
+                row("info", "Battery", "80 %"),
+                row("info", "Address", "BB:BB"),
+                row("action", "Connect", ""),
+                row("action", "Forget device", ""),
+                row("heading", "Available devices", ""),
+                row("action", "Pad", "Pair"),
+                row("action", "Search again", ""),
+            ]
+        );
+        state.on = false;
+        assert_eq!(bluetooth_rows(&state).len(), 1);
     }
 
     #[test]
@@ -995,7 +1743,13 @@ mod tests {
                 .set("bluetooth", "pair:--help", Value::Action)
                 .is_err()
         );
-        assert!(device.set("bluetooth", "bt:AA:BB", Value::Action).is_err());
+        for action in [
+            "bt-connect:AA:BB",
+            "bt-disconnect:--help",
+            "bt-forget:AA:BB:CC:DD:EE:FF;",
+        ] {
+            assert!(device.set("bluetooth", action, Value::Action).is_err(), "{action}");
+        }
     }
 
     #[test]

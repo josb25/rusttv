@@ -562,3 +562,12 @@ msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "आपके कंप्यूटर ने {n} बदलाव लागू किया"
 msgstr[1] "आपके कंप्यूटर ने {n} बदलाव लागू किए"
+
+msgid "Reset"
+msgstr "रीसेट करें"
+
+msgid "Done"
+msgstr "हो गया"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "हर कोने को तब तक खिसकाएँ जब तक ग्रिड के किनारे सीधे न हो जाएँ। तीर चिह्नित कोने को खिसकाते हैं, OK अगले कोने पर जाता है। या पॉइंटर से किसी कोने को खींचें।"

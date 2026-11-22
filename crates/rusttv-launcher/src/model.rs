@@ -365,6 +365,8 @@ pub enum QuickAction {
     Audio,
     /// The Network quick panel.
     Network,
+    /// Opens the device's video input (HDMI), shown by an app.
+    Input,
     /// Opens KDE Connect.
     KdeConnect,
     /// The RustTV quick panel: the panels' rows (About, RustTV Remote,
@@ -378,11 +380,12 @@ pub enum QuickAction {
 
 impl QuickAction {
     /// Every entry, in menu order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Search,
         Self::Modify,
         Self::Audio,
         Self::Network,
+        Self::Input,
         Self::KdeConnect,
         Self::Panels,
         Self::Settings,

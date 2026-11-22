@@ -558,3 +558,12 @@ msgstr "เชื่อมต่อ {} แล้ว"
 msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "คอมพิวเตอร์ใช้การเปลี่ยนแปลง {n} รายการแล้ว"
+
+msgid "Reset"
+msgstr "รีเซ็ต"
+
+msgid "Done"
+msgstr "เสร็จสิ้น"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "เลื่อนแต่ละมุมจนขอบของตารางตรง ปุ่มลูกศรเลื่อนมุมที่เลือก ปุ่ม OK ไปยังมุมถัดไป หรือลากมุมด้วยตัวชี้"

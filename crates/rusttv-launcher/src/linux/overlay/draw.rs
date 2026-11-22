@@ -104,7 +104,12 @@ pub fn draw(
 ) -> Option<Vec<u8>> {
     let mut pixmap = Pixmap::new(width, height)?;
     let u = unit(width);
-    pixmap.fill(crate::linux::keyboard::draw::color(DIM));
+    if panel.shows_pattern() {
+        // Focusing: the picture undimmed, the test pattern over it.
+        super::pattern::paint(&mut pixmap);
+    } else {
+        pixmap.fill(crate::linux::keyboard::draw::color(DIM));
+    }
     let panel_left = (DESIGN_WIDTH - PANEL_W) * u;
     if let Some(rect) = Rect::from_xywh(panel_left, 0.0, PANEL_W * u, height as f32) {
         pixmap.fill_rect(rect, &paint(PANEL), Transform::identity(), None);
@@ -154,6 +159,11 @@ pub fn draw(
                         format!("{:.0} %", volume.level * 100.0)
                     }
                 }),
+            ),
+            // Only ‹ and ›: the picture shows what it does.
+            Row::Device(n) => (
+                panel.side.get(n).map_or("", |row| row.label.as_str()),
+                Some(String::new()),
             ),
             Row::Close => (texts.close.as_str(), None),
         };
@@ -289,6 +299,7 @@ mod tests {
                 level: 0.4,
                 muted: false,
             }),
+            Vec::new(),
         );
         let (width, height) = (1920, 1080);
         let bytes = draw(
@@ -318,6 +329,48 @@ mod tests {
         // The second is not.
         let (left, top, _) = row_box(1);
         assert!(at(left as u32 + 8, top as u32 + 50)[0] < 0x40);
+    }
+
+    #[test]
+    fn a_focused_pattern_row_shows_the_pattern_instead_of_the_dim() {
+        let Some(font) = crate::linux::keyboard::draw::load_font() else {
+            return;
+        };
+        let focus = crate::linux::device_file::SideRow {
+            tab: "projector".into(),
+            id: "focus".into(),
+            label: "Focus".into(),
+            pattern: true,
+            keys: None,
+        };
+        let mut panel = Panel::new(None, None, vec![focus]);
+        // Close focused.
+        assert!(panel.focus_on(1));
+        let (width, height) = (1920, 1080);
+        let at = |bytes: &[u8], x: u32, y: u32| bytes[((y * width + x) * 4 + 3) as usize];
+        let dimmed = draw(
+            &panel,
+            "Kodi",
+            &OverlayTexts::default(),
+            &font,
+            width,
+            height,
+        )
+        .unwrap();
+        assert_eq!(at(&dimmed, 100, 300), DIM[3]);
+        assert!(panel.focus_control("projector", "focus"));
+        let pattern = draw(
+            &panel,
+            "Kodi",
+            &OverlayTexts::default(),
+            &font,
+            width,
+            height,
+        )
+        .unwrap();
+        // The picture shows through, the crosshair is opaque.
+        assert_eq!(at(&pattern, 100, 300), 0);
+        assert_eq!(at(&pattern, 100, 540), 0xFF);
     }
 
     #[test]

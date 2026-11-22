@@ -8,7 +8,9 @@
 //! SVG). Updates are the system package
 //! manager's job, so the launcher's updater does nothing here.
 
+mod audio;
 mod device;
+mod device_file;
 mod gamepad;
 mod keyboard;
 mod overlay;
@@ -46,6 +48,9 @@ pub enum AppEvent {
     Started(String),
     /// The app's process ended.
     Exited(String),
+    /// A source started sending a picture to the device's video input
+    /// (`device_file`'s `[[input]]`); arrives on the input's watcher thread.
+    InputSignal,
 }
 
 /// Receives [`AppEvent`]s; `Exited` arrives on a waiter thread.
@@ -76,6 +81,72 @@ const SVG_PIXELS: f32 = 256.0;
 /// KDE Connect's desktop entry, opened by its entry in the top-right menu.
 const KDE_CONNECT: &str = "org.kde.kdeconnect.app.desktop";
 
+/// How long the video input's watcher waits before starting its command
+/// again after it ended.
+const WATCH_RESTART: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Runs the video input's `watch` command on a thread of its own, again
+/// whenever it ends, and sends [`AppEvent::InputSignal`] when its lines
+/// say a picture started arriving.
+fn watch_input(command: Vec<String>, events: AppEvents) {
+    let started = std::thread::Builder::new()
+        .name("rusttv-input-watch".into())
+        .spawn(move || {
+            use std::io::BufRead as _;
+            let Some((program, args)) = command.split_first() else {
+                return;
+            };
+            // Whether a picture arrived when last heard; a picture that is
+            // already there at start doesn't switch.
+            let mut signal: Option<bool> = None;
+            loop {
+                let child = std::process::Command::new(program)
+                    .args(args)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .spawn();
+                match child {
+                    Ok(mut child) => {
+                        if let Some(out) = child.stdout.take() {
+                            for line in std::io::BufReader::new(out).lines() {
+                                let Ok(line) = line else { break };
+                                log::info!("video input: {line}");
+                                let (now, switch) = input_change(signal, &line);
+                                signal = now;
+                                if switch {
+                                    events(AppEvent::InputSignal);
+                                }
+                            }
+                        }
+                        let status = child.wait();
+                        log::warn!("{program} ended ({status:?}); again in {WATCH_RESTART:?}");
+                    }
+                    Err(error) => {
+                        log::warn!("{program} failed: {error}; again in {WATCH_RESTART:?}")
+                    }
+                }
+                std::thread::sleep(WATCH_RESTART);
+            }
+        });
+    if let Err(error) = started {
+        log::warn!("no thread to watch the video input: {error}");
+    }
+}
+
+/// A line of the video input's watcher after `before` (whether a picture
+/// arrived when last heard, `None` at start or while the input was
+/// unknown): whether one arrives now (`None`: unknown, "absent"), and
+/// whether to switch to it (only when it newly arrives after a line that
+/// said none did; a picture already there when the input becomes known
+/// doesn't switch, e.g. while the device starts).
+fn input_change(before: Option<bool>, line: &str) -> (Option<bool>, bool) {
+    if device_file::is_absent(line) {
+        return (None, false);
+    }
+    let now = device_file::has_signal(line);
+    (Some(now), now && before == Some(false))
+}
+
 /// Where packages put the launcher's licence notices.
 const NOTICES: &str = "/usr/share/doc/rusttv-launcher/NOTICES";
 
@@ -101,6 +172,8 @@ pub struct LinuxPlatform {
     /// again after [`UTC_OFFSET_FOR`], so a summer-time change shows within
     /// the hour without a `date` run for every clock tick or history row.
     utc_offset: RefCell<Option<(SystemTime, i32)>>,
+    /// The test pattern, once a control that shows it moved.
+    pattern: Option<overlay::PatternOverlay>,
 }
 
 /// How long a read UTC offset is used ([`LinuxPlatform::utc_offset_secs`]).
@@ -155,11 +228,7 @@ impl LinuxPlatform {
         let desktops = var("XDG_CURRENT_DESKTOP")
             .map(|value| value.split(':').map(str::to_owned).collect())
             .unwrap_or_default();
-        let language = ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .find_map(|name| var(name))
-            .filter(|value| value != "C" && value != "POSIX");
-        Self::new(dirs, desktops, language)
+        Self::new(dirs, desktops, ui_language())
     }
 
     /// A platform over these data directories (most important first), desktop
@@ -179,6 +248,7 @@ impl LinuxPlatform {
             overlay: None,
             volume_bar: None,
             utc_offset: RefCell::default(),
+            pattern: None,
         }
     }
 
@@ -200,8 +270,12 @@ impl LinuxPlatform {
     pub fn with_tasks(mut self, limits: Limits) -> Self {
         let tasks = Tasks::start(limits);
         let used = tasks.clone();
-        self.windows = Toplevels::start(Box::new(move |app_id| {
+        self.windows = Toplevels::start(Box::new(move |app_id, open| {
             use std::sync::atomic::Ordering;
+            let Some(app_id) = app_id else {
+                used.window_closed(open);
+                return;
+            };
             // The home screen's own window has no app ID.
             let home = app_id.is_empty() || app_id.to_lowercase().contains("rusttv");
             gamepad::HOME_IN_FRONT.store(home, Ordering::Relaxed);
@@ -209,7 +283,7 @@ impl LinuxPlatform {
             if !home {
                 keyboard::window_switched();
             }
-            let reads_pads = used.activated(app_id);
+            let reads_pads = used.activated(app_id, open);
             gamepad::KEYS_TO_APP.store(reads_pads == Some(false), Ordering::Relaxed);
         }));
         self.tasks = Some(tasks);
@@ -220,8 +294,20 @@ impl LinuxPlatform {
     /// the home screen.
     #[must_use]
     pub fn with_events(mut self, events: AppEvents) -> Self {
+        if let Some(input) = self.device.input()
+            && !input.watch.is_empty()
+        {
+            watch_input(input.watch, events.clone());
+        }
         self.events = Some(events);
         self
+    }
+
+    /// The desktop file ID of the app that shows the video input, if the
+    /// device has one and the app is installed.
+    fn input_app(&self) -> Option<String> {
+        let input = self.device.input()?;
+        device::has_desktop_entry(&self.data_dirs, &input.app).then_some(input.app)
     }
 
     /// Makes app `id`, running but not started by this launcher, one of its
@@ -306,6 +392,7 @@ impl LinuxPlatform {
     fn scan(&self) -> HashMap<String, DesktopEntry> {
         let mut found = HashMap::new();
         let mut taken = HashSet::new();
+        let input = self.device.input().map(|input| input.app);
         for dir in self.application_dirs() {
             let mut files = Vec::new();
             collect_desktop_files(&dir, &dir, &mut files);
@@ -316,8 +403,10 @@ impl LinuxPlatform {
                 let Ok(text) = fs::read_to_string(&path) else {
                     continue;
                 };
+                // The video input's app is opened from the top-right menu,
+                // so it may hide from menus (`NoDisplay`).
                 if let Some(entry) = DesktopEntry::parse(&text, &path, self.language.as_deref())
-                    && entry.is_visible(&self.desktops)
+                    && (entry.is_visible(&self.desktops) || input.as_deref() == Some(id.as_str()))
                 {
                     found.insert(id, entry);
                 }
@@ -378,8 +467,11 @@ impl Platform for LinuxPlatform {
     fn list_apps(&self) -> Result<Vec<AppEntry>, PlatformError> {
         *self.seen.borrow_mut() = self.stamps();
         let entries = self.scan();
+        // The video input has its entry in the top-right menu, no tile.
+        let input = self.device.input().map(|input| input.app);
         let apps = entries
             .iter()
+            .filter(|(id, _)| input.as_deref() != Some(id.as_str()))
             .map(|(id, entry)| AppEntry {
                 app: App {
                     id: id.clone(),
@@ -463,7 +555,14 @@ impl Platform for LinuxPlatform {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(dir) = &entry.working_dir {
+        // Apps start in their entry's Path, else at home, as a desktop's
+        // menu starts them: not in whatever directory the launcher was
+        // started from (a terminal's shell can't open one it may not enter).
+        if let Some(dir) = entry
+            .working_dir
+            .clone()
+            .or_else(|| std::env::var_os("HOME").map(Into::into))
+        {
             command.current_dir(dir);
         }
         let percent = self.app_scale(id);
@@ -584,11 +683,23 @@ impl Platform for LinuxPlatform {
         if device::has_desktop_entry(&self.data_dirs, KDE_CONNECT) {
             actions.push(QuickAction::KdeConnect);
         }
+        if self.input_app().is_some() {
+            actions.push(QuickAction::Input);
+        }
         actions
     }
 
     fn quick_action_app(&self, action: QuickAction) -> Option<String> {
-        (action == QuickAction::KdeConnect).then(|| KDE_CONNECT.to_owned())
+        match action {
+            QuickAction::KdeConnect => Some(KDE_CONNECT.to_owned()),
+            QuickAction::Input => self.input_app(),
+            _ => None,
+        }
+    }
+
+    fn input_label(&self) -> Option<String> {
+        self.input_app()?;
+        self.device.input().map(|input| input.label)
     }
 
     fn device_settings(&self) -> Option<Arc<dyn DeviceSettings>> {
@@ -629,7 +740,9 @@ impl Platform for LinuxPlatform {
             return Some(id);
         }
         // An app left running by an earlier launcher, in front.
-        let app_id = self.windows.as_ref()?.front()?.to_lowercase();
+        let windows = self.windows.as_ref()?;
+        let app_id = windows.front()?.to_lowercase();
+        let open = windows.app_ids();
         let entries = self.entries.borrow();
         let (id, entry) = entries
             .iter()
@@ -638,20 +751,39 @@ impl Platform for LinuxPlatform {
             return None;
         }
         if let Some(tasks) = &self.tasks {
-            tasks.activated(&app_id);
+            tasks.activated(&app_id, &open);
         }
         Some(id.clone())
     }
 
     fn open_overlay(&mut self, overlay: crate::platform::AppOverlay) -> bool {
         let device: Arc<dyn DeviceSettings> = self.device.clone();
-        self.overlay = overlay::Overlay::open(overlay, device);
+        self.overlay = overlay::Overlay::open(overlay, device, self.device.side_menu());
         self.overlay.is_some()
     }
 
     fn close_overlay(&mut self, to_home: bool) {
         if let Some(overlay) = &self.overlay {
             overlay.close(to_home);
+        }
+    }
+
+    fn nudged(&mut self, tab: &str, control: &str) {
+        if !self.device.shows_pattern(tab, control) {
+            return;
+        }
+        // The side menu draws the pattern itself, while that row is focused.
+        if overlay::shown()
+            && let Some(overlay) = &self.overlay
+        {
+            overlay.point(tab, control);
+            return;
+        }
+        if self.pattern.is_none() {
+            self.pattern = overlay::PatternOverlay::start();
+        }
+        if let Some(pattern) = &self.pattern {
+            pattern.show();
         }
     }
 
@@ -899,6 +1031,15 @@ fn expand_percent(arg: &str, entry: &DesktopEntry) -> String {
 
 /// The value of `key` in the best matching locale: `lang_COUNTRY@MODIFIER`,
 /// `lang_COUNTRY`, `lang@MODIFIER`, `lang`, then the plain key.
+/// The UI's language from the environment (`LANG` style), unless it is the
+/// plain C locale.
+fn ui_language() -> Option<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .filter(|value| value != "C" && value != "POSIX")
+}
+
 fn localized(values: &HashMap<&str, &str>, key: &str, language: Option<&str>) -> Option<String> {
     if let Some(language) = language {
         let locale = language.split('.').next().unwrap_or(language);
@@ -1234,6 +1375,32 @@ mod tests {
         assert_eq!(again.percent.len(), 1);
         assert_eq!(again.percent.get("org.kde.dolphin.desktop"), Some(&150));
         fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
+    fn only_a_newly_arriving_picture_switches() {
+        // Already there at start: no switch.
+        assert_eq!(
+            input_change(None, "signal 1920x1080@60"),
+            (Some(true), false)
+        );
+        assert_eq!(input_change(None, "no-signal"), (Some(false), false));
+        assert_eq!(
+            input_change(Some(false), "signal 1920x1080@60"),
+            (Some(true), true)
+        );
+        assert_eq!(
+            input_change(Some(true), "signal 1280x720@60"),
+            (Some(true), false)
+        );
+        assert_eq!(input_change(Some(true), "no-signal"), (Some(false), false));
+        // The input unknown (its service starting): what follows doesn't
+        // count as newly arriving.
+        assert_eq!(input_change(Some(false), "absent"), (None, false));
+        assert_eq!(
+            input_change(None, "signal 1920x1080@60"),
+            (Some(true), false)
+        );
     }
 
     #[test]

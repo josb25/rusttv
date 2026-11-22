@@ -558,3 +558,12 @@ msgstr "{} 已連線"
 msgid "Your computer applied {n} change"
 msgid_plural "Your computer applied {n} changes"
 msgstr[0] "電腦已套用 {n} 項變更"
+
+msgid "Reset"
+msgstr "重設"
+
+msgid "Done"
+msgstr "完成"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "移動每個角，直到格線的邊緣變直。方向鍵移動標記的角，OK 移到下一個角。也可以用指標拖曳角。"

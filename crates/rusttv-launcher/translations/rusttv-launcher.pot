@@ -741,3 +741,12 @@ msgstr ""
 #: templates/remote_row.json templates/remote_tile.json
 msgid "Phones: {}"
 msgstr ""
+
+msgid "Reset"
+msgstr ""
+
+msgid "Done"
+msgstr ""
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr ""

@@ -52,6 +52,7 @@ use generated::{
     RemotePanel, ReviewLine, SettingsRow, Strings, TileData,
 };
 
+mod corners_view;
 mod device_view;
 mod faces_view;
 mod remote_view;
@@ -287,6 +288,41 @@ impl Lifecycle {
     )]
     pub fn volume(&self, change: crate::device::VolumeChange) {
         self.deliver(move |controller| controller.volume_key(change));
+    }
+
+    /// A device control's key pressed outside the window (Linux:
+    /// `--control TAB/CONTROL left|right`, bound in the compositor, e.g.
+    /// a projector remote's focus keys): steps that nudge control by
+    /// `step` (`1` right, `-1` left), as its Settings row would.
+    #[cfg_attr(
+        not(feature = "linux"),
+        allow(dead_code, reason = "called by the Linux binary")
+    )]
+    pub fn control(&self, tab: String, control: String, step: i32) {
+        self.deliver(move |controller| {
+            controller.change_device(tab, control, crate::device::Value::Step(step));
+        });
+    }
+
+    /// A source started sending a picture to the device's video input
+    /// (Linux: its device file's `watch` command): the input comes to the
+    /// front, over Home or the app in front, as its top-right menu entry
+    /// would bring it.
+    #[cfg_attr(
+        not(feature = "linux"),
+        allow(dead_code, reason = "called by the Linux binary")
+    )]
+    pub fn input_signal(&self) {
+        self.deliver(|controller| {
+            if controller
+                .home
+                .quick_actions()
+                .contains(&crate::model::QuickAction::Input)
+            {
+                log::info!("a picture arrives at the video input; showing it");
+                controller.open_quick(crate::model::QuickAction::Input);
+            }
+        });
     }
 
     /// Home held (Linux: `--app-menu`): the app overlay over the app in
@@ -705,6 +741,22 @@ fn start(
         }
     });
     let weak = Rc::downgrade(&controller);
+    window.on_corners_pointer(move |action, x, y| {
+        if let Some(controller) = weak.upgrade() {
+            let mut controller = controller.borrow_mut();
+            controller.pointer_moved();
+            controller.corners_pointer(action, x, y);
+        }
+    });
+    let weak = Rc::downgrade(&controller);
+    window.on_corners_button(move |done, clicked| {
+        if let Some(controller) = weak.upgrade() {
+            let mut controller = controller.borrow_mut();
+            controller.pointer_moved();
+            controller.corners_button(done, clicked);
+        }
+    });
+    let weak = Rc::downgrade(&controller);
     window.on_scrolled(move |delta| {
         if let Some(controller) = weak.upgrade() {
             controller.borrow_mut().scrolled(delta);
@@ -1010,6 +1062,13 @@ struct Controller {
     prompt: Option<device_view::Prompt>,
     /// The status corner, banners and the idle screen (ui/faces_view.rs).
     faces: faces_view::Faces,
+    /// The open full-screen view of a corners control (keystone).
+    corners: Option<crate::corners::CornerEdit>,
+    /// Its latest points, waiting for the change before them to finish:
+    /// tab, control, points.
+    corners_queued: Option<(String, String, [i32; 8])>,
+    /// Why the device refused the last change, shown on the view.
+    corners_status: String,
 }
 
 impl Controller {
@@ -1044,6 +1103,7 @@ impl Controller {
         let link_codes = Rc::new(VecModel::default());
         window.set_network_icons(ModelRc::from(link_codes.clone()));
         show_about_panel(window, &UpdateStatus::Idle);
+        window.set_input_label(platform.input_label().unwrap_or_default().into());
 
         let (order, folders, hidden, saved_focus) =
             options
@@ -1173,6 +1233,9 @@ impl Controller {
                 pointer_timer: Timer::default(),
                 prompt: None,
                 faces,
+                corners: None,
+                corners_queued: None,
+                corners_status: String::new(),
             })
         });
         *controller.borrow().options.lifecycle.0.borrow_mut() = Rc::downgrade(&controller);
@@ -1435,6 +1498,14 @@ impl Controller {
             }
             return;
         }
+        // The keystone view takes every key while it is open.
+        if self.corners.is_some()
+            && !matches!(input, Input::Tick | Input::Paused | Input::LaunchFailed)
+        {
+            self.corners_input(input);
+            self.restart_idle();
+            return;
+        }
         let effect = self.home.handle(input, (self.clock)());
         if input != Input::Tick {
             self.pressed = input == Input::OkPressed
@@ -1454,6 +1525,7 @@ impl Controller {
             self.idle_timer.stop();
             self.set_idle_phase(0);
             self.prompt = None;
+            self.corners = None;
             self.close_settings_view();
             self.close_quick_view();
             self.schedule_pack();
@@ -2202,6 +2274,7 @@ impl Controller {
         self.render_settings(&window);
         self.render_quick(&window);
         self.render_prompt(&window);
+        self.render_corners(&window);
         self.render_remote_page(&window);
         self.render_pairing(&window);
         window.set_pressed(self.pressed);
@@ -3430,6 +3503,10 @@ mod tests {
             self.platform.borrow().quick_action_app(action)
         }
 
+        fn input_label(&self) -> Option<String> {
+            self.platform.borrow().input_label()
+        }
+
         fn device_settings(&self) -> Option<std::sync::Arc<dyn crate::device::DeviceSettings>> {
             self.platform.borrow().device_settings()
         }
@@ -3464,6 +3541,10 @@ mod tests {
 
         fn close_overlay(&mut self, to_home: bool) {
             self.platform.borrow_mut().close_overlay(to_home);
+        }
+
+        fn nudged(&mut self, tab: &str, control: &str) {
+            self.platform.borrow_mut().nudged(tab, control);
         }
     }
 
@@ -6300,6 +6381,52 @@ mod tests {
     }
 
     #[test]
+    fn a_nudge_control_steps_both_ways_and_from_outside() {
+        let platform = abc().with_device();
+        let device = platform.device().unwrap();
+        let screen = screen_with(platform, None);
+        click_settings(&screen.window);
+        settle(&screen);
+        let display = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section.title == "Display")
+            .unwrap();
+        for _ in 0..display {
+            screen.tap(DOWN);
+        }
+        // Focus is the Display tab's fourth row.
+        screen.tap(RIGHT);
+        for _ in 0..3 {
+            screen.tap(DOWN);
+        }
+        screen.tap(RIGHT);
+        screen.tap(LEFT);
+        // OK does nothing on it.
+        screen.tap(OK);
+        settle(&screen);
+        assert_eq!(
+            device
+                .changes()
+                .iter()
+                .filter(|change| change.starts_with("display/focus"))
+                .collect::<Vec<_>>(),
+            ["display/focus=Step(1)", "display/focus=Step(-1)"]
+        );
+        // A remote's key bound in the compositor does the same.
+        screen
+            .lifecycle
+            .control("display".into(), "focus".into(), 1);
+        settle(&screen);
+        assert_eq!(device.changes().last().unwrap(), "display/focus=Step(1)");
+        assert_eq!(
+            screen.shared.platform.borrow().nudges(),
+            ["display/focus", "display/focus", "display/focus"]
+        );
+    }
+
+    #[test]
     fn back_closes_the_text_prompt_without_a_change() {
         let platform = abc().with_device();
         let device = platform.device().unwrap();
@@ -6320,6 +6447,65 @@ mod tests {
             screen.window.get_prompt_shown(),
             "the keys are back on Settings"
         );
+    }
+
+    #[test]
+    fn the_keystone_view_moves_corners_with_keys_and_the_pointer() {
+        let platform = abc().with_device();
+        let device = platform.device().unwrap();
+        let screen = screen_with(platform, None);
+        click_settings(&screen.window);
+        settle(&screen);
+        let display = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section.title == "Display")
+            .unwrap();
+        for _ in 0..display {
+            screen.tap(DOWN);
+        }
+        // Keystone, the fifth row of Display.
+        screen.tap(RIGHT);
+        for _ in 0..4 {
+            screen.tap(DOWN);
+        }
+        screen.tap(OK);
+        assert!(screen.window.get_corners_shown());
+        assert_eq!(screen.window.get_corners_title(), "Keystone");
+        assert_eq!(screen.window.get_corners_focus(), 0);
+        screen.tap(RIGHT);
+        settle(&screen);
+        assert!(device.changes().contains(
+            &"display/keystone=Corners([2, 0, 1919, 0, 0, 1079, 1919, 1079])".to_owned()
+        ));
+        assert_eq!(
+            screen.window.get_corners_offsets().row_data(0).unwrap(),
+            "+2, +0"
+        );
+        // The pointer drags the bottom right corner a tenth to the left.
+        screen.window.invoke_corners_pointer(1, 0.9, 0.9);
+        screen.window.invoke_corners_pointer(2, 0.85, 0.9);
+        screen.window.invoke_corners_pointer(2, 0.8, 0.9);
+        screen.window.invoke_corners_pointer(3, 0.8, 0.9);
+        settle(&screen);
+        assert_eq!(screen.window.get_corners_focus(), 3);
+        assert_eq!(
+            screen.window.get_corners_offsets().row_data(3).unwrap(),
+            "-192, +0"
+        );
+        assert_eq!(
+            device.changes().last().map(String::as_str),
+            Some("display/keystone=Corners([2, 0, 1919, 0, 0, 1079, 1727, 1079])"),
+            "the latest points reach the device"
+        );
+        // Done with the pointer; Settings has the keys again.
+        screen.window.invoke_corners_button(true, true);
+        assert!(!screen.window.get_corners_shown());
+        screen.tap(OK);
+        assert!(screen.window.get_corners_shown(), "OK opens it again");
+        screen.tap(BACK);
+        assert!(!screen.window.get_corners_shown());
     }
 
     #[test]

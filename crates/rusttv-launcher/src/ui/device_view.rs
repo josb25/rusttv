@@ -76,6 +76,8 @@ fn quick_code(action: QuickAction) -> i32 {
         QuickAction::Settings => 5,
         QuickAction::Power => 6,
         QuickAction::Panels => 7,
+        // After Network in the menu, so above 3 (quick.slint `start`).
+        QuickAction::Input => 8,
     }
 }
 
@@ -110,7 +112,12 @@ pub(super) fn control_row(window: &HomeWindow, control: &Control) -> SettingsRow
         ControlKind::Choice { options, selected } => {
             row.detail = given(options.get(*selected).cloned().unwrap_or_default());
         }
-        ControlKind::Action | ControlKind::Text { .. } | ControlKind::Info => {}
+        ControlKind::Nudge => row.detail = given("‹  ›".to_owned()),
+        ControlKind::Heading => row.heading = true,
+        ControlKind::Action
+        | ControlKind::Text { .. }
+        | ControlKind::Info
+        | ControlKind::Corners { .. } => {}
     }
     row
 }
@@ -267,6 +274,11 @@ impl Controller {
         let Some(device) = self.device.clone() else {
             return;
         };
+        if matches!(value, Value::Step(_)) {
+            // A lens focus and the like: the platform may show a test
+            // pattern while it moves.
+            self.platform.nudged(&tab, &control);
+        }
         self.device_pending += 1;
         let started = in_background(
             "rusttv-device",
@@ -275,13 +287,16 @@ impl Controller {
                 controller.device_pending = controller.device_pending.saturating_sub(1);
                 if let Err(reason) = result {
                     log::warn!("changing a setting failed: {reason}");
-                    if controller.quick.is_some() {
+                    if controller.corners.is_some() {
+                        controller.corners_status = reason;
+                    } else if controller.quick.is_some() {
                         controller.quick_status = reason;
                     } else {
                         controller.settings_failed(reason);
                     }
                 }
-                if controller.device_pending == 0 {
+                controller.corners_flush();
+                if controller.device_pending == 0 && controller.corners.is_none() {
                     controller.refresh_quick();
                     controller.refresh_device_tabs();
                 }

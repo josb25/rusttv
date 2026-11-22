@@ -22,6 +22,8 @@ export struct SettingsRow {
     // later (History's age) doesn't move the rows under it (a list's
     // `MenuRow`).
     tall: bool,
+    // The title of the rows below (focus passes over it).
+    heading: bool,
 }
 
 // A row in the long-press menu's style (home.slint `MenuRow`), with a level
@@ -38,6 +40,7 @@ export component ControlRow inherits Rectangle {
     in property <float> level;
     // Two lines tall even while `detail` is empty (`SettingsRow.tall`).
     in property <bool> tall;
+    in property <bool> heading;
     property <bool> one-line: detail == "" && !slider && !tall;
     height: (one-line ? 64 : 96) * u;
     border-radius: 10 * u;
@@ -63,11 +66,11 @@ export component ControlRow inherits Rectangle {
         width: parent.width - 68 * u;
         height: root.one-line ? parent.height : 34 * u;
         text: root.text;
-        font-size: 27 * u;
-        font-weight: 500;
-        color: selected ? Theme.bg : dim ? Theme.text-dim : Theme.text;
+        font-size: (heading ? 22 : 27) * u;
+        font-weight: heading ? 700 : 500;
+        color: selected ? Theme.bg : heading ? Theme.accent : dim ? Theme.text-dim : Theme.text;
         horizontal-alignment: root.start;
-        vertical-alignment: center;
+        vertical-alignment: heading ? TextVerticalAlignment.bottom : TextVerticalAlignment.center;
         overflow: elide;
         animate color { duration: 120ms; }
     }
@@ -119,6 +122,8 @@ export component QuickBar inherits Rectangle {
     // before Network have a lower code and those after it a higher one
     // (model.rs `QuickAction::ALL`).
     in property <[int]> links;
+    // The name of the device's video input (code 7), e.g. "HDMI".
+    in property <string> input-label;
     // A click on entry `index`.
     callback clicked(int);
     // The pointer moved onto entry `index`.
@@ -157,6 +162,7 @@ export component QuickBar inherits Rectangle {
         if code == 5 { return @tr("Settings"); }
         // A name, the same in every language.
         if code == 7 { return "RustTV"; }
+        if code == 8 { return input-label; }
         return @tr("Power");
     }
     // 24 × 24 outline icons, drawn as strokes.
@@ -168,6 +174,8 @@ export component QuickBar inherits Rectangle {
         if code == 4 { return "M 7 2 L 17 2 L 17 22 L 7 22 Z M 10.5 18.5 L 13.5 18.5"; }
         // Four tiles: RustTV's own panels.
         if code == 7 { return "M 4 4 L 10 4 L 10 10 L 4 10 Z M 14 4 L 20 4 L 20 10 L 14 10 Z M 4 14 L 10 14 L 10 20 L 4 20 Z M 14 14 L 20 14 L 20 20 L 14 20 Z"; }
+        // A video input: an arrow into a screen.
+        if code == 8 { return "M 9 7 L 9 4 L 21 4 L 21 18 L 9 18 L 9 15 M 2 11 L 14 11 M 10.5 7.5 L 14 11 L 10.5 14.5 M 12 21 L 18 21"; }
         if code == 5 { return "M 19.18 9.51 L 21.77 9.86 L 21.77 14.14 L 19.18 14.49 L 18.84 15.32 L 20.42 17.39 L 17.39 20.42 L 15.32 18.84 L 14.49 19.18 L 14.14 21.77 L 9.86 21.77 L 9.51 19.18 L 8.68 18.84 L 6.61 20.42 L 3.58 17.39 L 5.16 15.32 L 4.82 14.49 L 2.23 14.14 L 2.23 9.86 L 4.82 9.51 L 5.16 8.68 L 3.58 6.61 L 6.61 3.58 L 8.68 5.16 L 9.51 4.82 L 9.86 2.23 L 14.14 2.23 L 14.49 4.82 L 15.32 5.16 L 17.39 3.58 L 20.42 6.61 L 18.84 8.68 Z M 15.2 12 A 3.2 3.2 0 1 0 8.8 12 A 3.2 3.2 0 1 0 15.2 12 Z"; }
         return "M 12 2.5 L 12 11 M 6.5 5.5 A 8 8 0 1 0 17.5 5.5";
     }
@@ -323,6 +331,7 @@ export component QuickPanel inherits Rectangle {
             slider: data.slider;
             level: data.level;
             tall: data.tall;
+            heading: data.heading;
             selected: i == focused-row;
             visible: i >= first-row;
         }
@@ -549,5 +558,169 @@ export component TextPromptView inherits Rectangle {
         font-size: 28 * u;
         color: Theme.text-dim;
         overflow: elide;
+    }
+}
+
+// One corner's marker of `CornersView`: an L along the screen's corner.
+component CornerMark inherits Rectangle {
+    in property <length> u;
+    in property <bool> right;
+    in property <bool> bottom;
+    in property <bool> active;
+    property <length> arm: 150 * u;
+    property <length> thick: active ? 14 * u : 8 * u;
+    property <color> ink: active ? Theme.accent : Theme.text;
+
+    width: arm;
+    height: arm;
+    Rectangle {
+        x: right ? parent.width - self.width : 0;
+        y: bottom ? parent.height - thick : 0;
+        width: arm;
+        height: thick;
+        background: ink;
+    }
+    Rectangle {
+        x: right ? parent.width - thick : 0;
+        y: bottom ? parent.height - self.height : 0;
+        width: thick;
+        height: arm;
+        background: ink;
+    }
+}
+
+// The full-screen view of a corners control: a projector's keystone
+// (src/corners.rs, src/ui/corners_view.rs). A grid fills the screen so the
+// warped picture shows how straight it is; the focused corner is marked.
+export component CornersView inherits Rectangle {
+    in property <length> u;
+    in property <string> title;
+    // 0 top left, 1 top right, 2 bottom left, 3 bottom right, 4 Reset, 5 Done.
+    in property <int> marked;
+    // Each corner's offset ("+40, +20"); empty where it hasn't moved.
+    in property <[string]> offsets;
+    in property <string> status;
+    // The mouse pointer is in use (home.slint `Pointer.shown`).
+    in property <bool> pointer-shown;
+    // `action` 0 hover, 1 press, 2 drag, 3 release, at fractions of the screen.
+    callback pointer(/* action */ int, /* x */ float, /* y */ float);
+    // The pointer over Reset (`done` false) or Done; `clicked` a click.
+    callback button(/* done */ bool, /* clicked */ bool);
+
+    background: Theme.bg;
+
+    // The grid: 16 × 9 squares, and the centre lines brighter.
+    for i in 17: Rectangle {
+        x: i * (root.width - 2 * u) / 16;
+        width: 2 * u;
+        height: root.height;
+        background: i == 8 ? Theme.text.with-alpha(0.5) : Theme.text.with-alpha(0.18);
+    }
+    for i in 10: Rectangle {
+        y: i * (root.height - 2 * u) / 9;
+        width: root.width;
+        height: 2 * u;
+        background: Theme.text.with-alpha(0.18);
+    }
+    Rectangle {
+        y: (root.height - 2 * u) / 2;
+        width: root.width;
+        height: 2 * u;
+        background: Theme.text.with-alpha(0.5);
+    }
+
+    TouchArea {
+        mouse-cursor: root.pointer-shown ? MouseCursor.default : MouseCursor.none;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.move {
+                root.pointer(self.pressed ? 2 : 0, self.mouse-x / root.width, self.mouse-y / root.height);
+            } else if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                root.pointer(1, self.mouse-x / root.width, self.mouse-y / root.height);
+            } else if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                root.pointer(3, self.mouse-x / root.width, self.mouse-y / root.height);
+            }
+        }
+    }
+
+    for corner in 4: CornerMark {
+        x: mod(corner, 2) == 1 ? root.width - self.width : 0;
+        y: corner >= 2 ? root.height - self.height : 0;
+        u: root.u;
+        right: mod(corner, 2) == 1;
+        bottom: corner >= 2;
+        active: root.marked == corner;
+    }
+    for corner in 4: Text {
+        x: mod(corner, 2) == 1 ? root.width - 180 * u - self.width : 180 * u;
+        y: corner >= 2 ? root.height - 180 * u - self.height : 180 * u;
+        text: offsets[corner];
+        font-size: 32 * u;
+        color: root.marked == corner ? Theme.accent : Theme.text;
+    }
+
+    // The middle: what this is and how to use it.
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 1000 * u;
+        height: 420 * u;
+        border-radius: 20 * u;
+        background: Theme.surface.with-alpha(0.92);
+
+        Text {
+            y: 40 * u;
+            width: parent.width;
+            horizontal-alignment: center;
+            text: root.title;
+            font-size: 44 * u;
+            color: Theme.text;
+        }
+        Text {
+            x: 60 * u;
+            y: 120 * u;
+            width: parent.width - 120 * u;
+            horizontal-alignment: center;
+            text: @tr("Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer.");
+            font-size: 28 * u;
+            color: Theme.text-dim;
+            wrap: word-wrap;
+        }
+        Text {
+            x: 60 * u;
+            y: 250 * u;
+            width: parent.width - 120 * u;
+            horizontal-alignment: center;
+            text: root.status;
+            font-size: 26 * u;
+            color: Theme.accent;
+            overflow: elide;
+        }
+        for button in 2: Rectangle {
+            x: parent.width / 2 + (button == 0 ? -self.width - 20 * u : 20 * u);
+            y: parent.height - self.height - 40 * u;
+            width: 260 * u;
+            height: 76 * u;
+            border-radius: 38 * u;
+            property <bool> focused: root.marked == (button == 0 ? 4 : 5);
+            background: focused ? Theme.text : Theme.text.with-alpha(0.12);
+            Text {
+                width: parent.width;
+                height: parent.height;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: button == 0 ? @tr("Reset") : @tr("Done");
+                font-size: 30 * u;
+                font-weight: 600;
+                color: focused ? Theme.bg : Theme.text;
+            }
+            TouchArea {
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.move {
+                        root.button(button == 1, false);
+                    }
+                }
+                clicked => { root.button(button == 1, true); }
+            }
+        }
     }
 }
