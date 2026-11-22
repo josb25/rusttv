@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 
 /// How many apps run and how much memory they leave.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Limits {
     /// Apps kept running besides the launcher; starting one more closes the
     /// least recently used. `None`: no limit.
@@ -19,9 +19,27 @@ pub struct Limits {
     /// Close background apps (least recently used first) while the kernel's
     /// `MemAvailable` is below this many MiB. `None`: never.
     pub min_available_mib: Option<u64>,
+    /// Close background apps the same way while more than this many MiB of
+    /// swap are in use, so the box stays responsive instead of swapping.
+    /// `None`: never.
+    pub max_swap_mib: Option<u64>,
     /// Stop (SIGSTOP) every app but the one in front, and continue it when
     /// its window comes to the front again. Also pauses background music.
     pub freeze_background: bool,
+    /// Apps (desktop file IDs without `.desktop`, any case) that are never
+    /// frozen (only muted) and are closed for memory only after every other
+    /// background app: those that must keep talking to the network, such as a game
+    /// stream, which a paused app loses.
+    pub keep_running: Vec<String>,
+}
+
+impl Limits {
+    fn keeps_running(&self, id: &str) -> bool {
+        let app = id.strip_suffix(".desktop").unwrap_or(id);
+        self.keep_running
+            .iter()
+            .any(|kept| kept.eq_ignore_ascii_case(app))
+    }
 }
 
 /// How long an app has to quit after SIGTERM before it gets SIGKILL.
@@ -29,6 +47,10 @@ const GRACE: Duration = Duration::from_secs(5);
 
 /// How often available memory is checked.
 const MEMORY_POLL: Duration = Duration::from_secs(2);
+
+/// After closing an app for memory, how long to wait before judging memory
+/// again: the app needs time to exit and hand its memory back.
+const MEMORY_SETTLE: Duration = Duration::from_secs(6);
 
 /// The running apps, shared with the threads that wait for them.
 #[derive(Debug, Default)]
@@ -51,27 +73,31 @@ struct Task {
     used: Instant,
     closing: bool,
     frozen: bool,
+    /// Its sound is muted while it keeps running in the background.
+    muted: bool,
 }
 
 impl Tasks {
     /// Starts watching memory if `limits` asks for it.
     pub fn start(limits: Limits) -> Arc<Self> {
+        let (min, max_swap) = (limits.min_available_mib, limits.max_swap_mib);
         let tasks = Arc::new(Self {
             limits,
             running: Mutex::default(),
             front: Mutex::default(),
         });
-        if let Some(min) = limits.min_available_mib {
+        if min.is_some() || max_swap.is_some() {
             let weak = Arc::downgrade(&tasks);
             let spawned = std::thread::Builder::new()
                 .name("rusttv-memory".into())
                 .spawn(move || {
                     while let Some(tasks) = weak.upgrade() {
-                        if available_mib().is_some_and(|available| available < min) {
-                            tasks.close_one_in_background("memory is low");
-                        }
+                        let reason =
+                            read_meminfo().and_then(|memory| memory_short(memory, min, max_swap));
+                        let closed =
+                            reason.is_some_and(|reason| tasks.close_one_in_background(reason));
                         drop(tasks);
-                        std::thread::sleep(MEMORY_POLL);
+                        std::thread::sleep(if closed { MEMORY_SETTLE } else { MEMORY_POLL });
                     }
                 });
             if let Err(error) = spawned {
@@ -150,6 +176,7 @@ impl Tasks {
                 used: Instant::now(),
                 closing: false,
                 frozen: false,
+                muted: false,
             });
             let Some(max) = self.limits.max_apps else {
                 return;
@@ -188,7 +215,7 @@ impl Tasks {
 
     /// A window with this app ID came to the front (the launcher's own too):
     /// its app was just used, and with [`Limits::freeze_background`] every
-    /// other app stops. Returns whether that app reads game controllers
+    /// other app stops; apps in [`Limits::keep_running`] are muted instead. Returns whether that app reads game controllers
     /// itself; `None` for a window of no app started here.
     pub fn activated(&self, app_id: &str) -> Option<bool> {
         let app_id = app_id.to_lowercase();
@@ -199,10 +226,23 @@ impl Tasks {
                 task.used = Instant::now();
                 front_id = Some((task.id.clone(), task.reads_pads));
             }
+            if front && task.muted {
+                task.muted = false;
+                super::audio::set_muted(task.id.clone(), task.group, false);
+            } else if !front && !task.muted && !task.closing && self.limits.keeps_running(&task.id)
+            {
+                task.muted = true;
+                super::audio::set_muted(task.id.clone(), task.group, true);
+            }
             if front && task.frozen {
                 task.frozen = false;
                 signal(task.group, Signal::CONT);
-            } else if !front && !task.frozen && !task.closing && self.limits.freeze_background {
+            } else if !front
+                && !task.frozen
+                && !task.closing
+                && self.limits.freeze_background
+                && !self.limits.keeps_running(&task.id)
+            {
                 task.frozen = true;
                 log::info!("freezing {} in the background", task.id);
                 signal(task.group, Signal::STOP);
@@ -213,22 +253,32 @@ impl Tasks {
         Some(reads_pads)
     }
 
-    /// Closes the least recently used app that is not the most recent one.
-    fn close_one_in_background(&self, reason: &str) {
+    /// Closes one background app: never the most recently used one, apps in
+    /// [`Limits::keep_running`] only when no other is left, else the least
+    /// recently used. Whether one was closed.
+    fn close_one_in_background(&self, reason: &str) -> bool {
         let victim = {
             let mut running = self.lock();
             let mut open: Vec<&mut Task> =
                 running.iter_mut().filter(|task| !task.closing).collect();
             if open.len() < 2 {
-                return;
+                return false;
             }
             open.sort_by_key(|task| task.used);
-            let task = &mut open[0];
+            open.pop();
+            // `min_by_key` keeps the first of equals: the least recently used.
+            let Some(task) = open
+                .into_iter()
+                .min_by_key(|task| self.limits.keeps_running(&task.id))
+            else {
+                return false;
+            };
             task.closing = true;
             task.clone()
         };
         log::warn!("closing {} ({reason})", victim.id);
         self.close(victim);
+        true
     }
 
     /// SIGTERM to the app's process group; SIGKILL if it is still there
@@ -317,13 +367,46 @@ fn signal(group: i32, sig: Signal) {
 }
 
 /// `MemAvailable` from `/proc/meminfo`, in MiB.
-fn available_mib() -> Option<u64> {
-    let text = fs::read_to_string("/proc/meminfo").ok()?;
-    let line = text
-        .lines()
-        .find(|line| line.starts_with("MemAvailable:"))?;
-    let kib: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kib / 1024)
+/// What `/proc/meminfo` says, in MiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Memory {
+    available: u64,
+    swap_used: u64,
+}
+
+fn read_meminfo() -> Option<Memory> {
+    parse_meminfo(&fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+fn parse_meminfo(text: &str) -> Option<Memory> {
+    let field = |name: &str| -> Option<u64> {
+        let line = text.lines().find(|line| line.starts_with(name))?;
+        line.get(name.len()..)?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    let available = field("MemAvailable:")?;
+    // No swap at all reads as none in use.
+    let swap_used = field("SwapTotal:")
+        .zip(field("SwapFree:"))
+        .map_or(0, |(total, free)| total.saturating_sub(free));
+    Some(Memory {
+        available: available / 1024,
+        swap_used: swap_used / 1024,
+    })
+}
+
+/// Why a background app must close now, if it must.
+fn memory_short(memory: Memory, min: Option<u64>, max_swap: Option<u64>) -> Option<&'static str> {
+    if min.is_some_and(|min| memory.available < min) {
+        Some("memory is low")
+    } else if max_swap.is_some_and(|max| memory.swap_used > max) {
+        Some("swap is in use")
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +424,88 @@ mod tests {
         assert!(runs(b"/bin/sh\0/usr/bin/kodi\0", "kodi"));
         assert!(!runs(b"/usr/bin/dolphin-helper\0", "dolphin"));
         assert!(!runs(b"", "dolphin"));
+    }
+
+    #[test]
+    fn reads_available_memory_and_swap_in_use() {
+        let text = "MemTotal:  941056 kB\nMemFree:  61164 kB\nMemAvailable:  201600 kB\n\
+                    SwapTotal:  941052 kB\nSwapFree:  335900 kB\n";
+        assert_eq!(
+            parse_meminfo(text),
+            Some(Memory {
+                available: 196,
+                swap_used: 590
+            })
+        );
+        let no_swap = "MemAvailable:  512000 kB\n";
+        assert_eq!(
+            parse_meminfo(no_swap).map(|memory| memory.swap_used),
+            Some(0)
+        );
+        assert_eq!(parse_meminfo("MemFree: 1 kB\n"), None);
+    }
+
+    #[test]
+    fn closes_for_low_memory_or_for_swap_in_use() {
+        let memory = |available, swap_used| Memory {
+            available,
+            swap_used,
+        };
+        assert_eq!(
+            memory_short(memory(250, 0), Some(300), Some(100)),
+            Some("memory is low")
+        );
+        assert_eq!(
+            memory_short(memory(400, 150), Some(300), Some(100)),
+            Some("swap is in use")
+        );
+        assert_eq!(memory_short(memory(400, 50), Some(300), Some(100)), None);
+        assert_eq!(memory_short(memory(10, 900), None, None), None);
+    }
+
+    #[test]
+    fn a_kept_app_is_never_frozen_and_closes_last() {
+        let limits = Limits {
+            freeze_background: true,
+            keep_running: vec!["com.moonlight_stream.Moonlight".into()],
+            ..Limits::default()
+        };
+        assert!(limits.keeps_running("com.moonlight_stream.Moonlight.desktop"));
+        assert!(limits.keeps_running("COM.moonlight_stream.moonlight"));
+        assert!(!limits.keeps_running("org.kde.dolphin.desktop"));
+        let tasks = Tasks::start(limits);
+        let moonlight = "com.moonlight_stream.Moonlight.desktop";
+        tasks.started(
+            moonlight,
+            4_000_010,
+            vec!["com.moonlight_stream.moonlight".into()],
+            false,
+        );
+        tasks.started(
+            "org.kde.dolphin.desktop",
+            4_000_011,
+            vec!["org.kde.dolphin".into()],
+            false,
+        );
+        tasks.started(
+            "org.gnome.Loupe.desktop",
+            4_000_012,
+            vec!["org.gnome.loupe".into()],
+            false,
+        );
+        tasks.activated("org.gnome.loupe");
+        let frozen = |id: &str| tasks.lock().iter().any(|task| task.id == id && task.frozen);
+        assert!(!frozen(moonlight), "a game stream keeps running");
+        assert!(frozen("org.kde.dolphin.desktop"));
+        // Moonlight is the least recently used, yet Dolphin goes first; the
+        // app in front never does.
+        assert!(tasks.close_one_in_background("test"));
+        assert!(!tasks.is_running("org.kde.dolphin.desktop"));
+        assert!(tasks.is_running(moonlight));
+        assert!(tasks.close_one_in_background("test"));
+        assert!(!tasks.is_running(moonlight));
+        assert!(!tasks.close_one_in_background("test"));
+        assert!(tasks.is_running("org.gnome.Loupe.desktop"));
     }
 
     #[test]

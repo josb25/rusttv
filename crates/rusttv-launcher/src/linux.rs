@@ -8,6 +8,7 @@
 //! SVG). Updates are the system package
 //! manager's job, so the launcher's updater does nothing here.
 
+mod audio;
 mod device;
 mod device_file;
 mod gamepad;

@@ -35,12 +35,16 @@ impl std::fmt::Debug for Toplevels {
 #[derive(Default)]
 struct Shared {
     windows: Vec<Window>,
+    /// Counts activations, for [`Window::last_front`].
+    activations: u64,
 }
 
 struct Window {
     handle: ZwlrForeignToplevelHandleV1,
     app_id: String,
     activated: bool,
+    /// When it last came to the front ([`Shared::activations`]); 0 never.
+    last_front: u64,
     /// State received since the last `done`.
     pending_app_id: Option<String>,
     pending_activated: Option<bool>,
@@ -105,17 +109,21 @@ impl Toplevels {
             .map(|window| window.app_id.clone())
     }
 
-    /// Brings the first window whose app ID matches one of `keys`
-    /// (lower case) to the front; whether there was one.
+    /// Brings the window whose app ID matches one of `keys` (lower case) to
+    /// the front; whether there was one. Of an app's windows, the one last
+    /// in front: Moonlight's stream rather than its menu behind it.
     pub fn activate(&self, keys: &[String]) -> bool {
         let shared = lock(&self.shared);
-        let Some(window) = shared
-            .windows
-            .iter()
-            .find(|window| keys.contains(&window.app_id.to_lowercase()))
-        else {
+        let Some(index) = newest(
+            shared
+                .windows
+                .iter()
+                .map(|window| (window.app_id.as_str(), window.last_front)),
+            keys,
+        ) else {
             return false;
         };
+        let window = &shared.windows[index];
         window.handle.activate(&self.seat);
         if let Err(error) = self.connection.flush() {
             log::warn!("raising {} failed: {error}", window.app_id);
@@ -123,6 +131,20 @@ impl Toplevels {
         }
         true
     }
+}
+
+/// The index of the window last in front among those (app ID, last time in
+/// front) whose app ID is one of `keys`; on a tie (never in front) the first.
+fn newest<'a>(windows: impl Iterator<Item = (&'a str, u64)>, keys: &[String]) -> Option<usize> {
+    let mut best: Option<(usize, u64)> = None;
+    for (index, (app_id, last_front)) in windows.enumerate() {
+        if keys.contains(&app_id.to_lowercase())
+            && best.is_none_or(|(_, newest)| last_front > newest)
+        {
+            best = Some((index, last_front));
+        }
+    }
+    best.map(|(index, _)| index)
 }
 
 fn lock(shared: &Mutex<Shared>) -> MutexGuard<'_, Shared> {
@@ -172,6 +194,7 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for State {
                 handle: toplevel,
                 app_id: String::new(),
                 activated: false,
+                last_front: 0,
                 pending_app_id: None,
                 pending_activated: None,
             });
@@ -213,6 +236,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
                 shared.windows[index].pending_activated = Some(activated);
             }
             handle::Event::Done => {
+                let now = shared.activations + 1;
                 let window = &mut shared.windows[index];
                 if let Some(app_id) = window.pending_app_id.take() {
                     if window.app_id.is_empty() {
@@ -224,8 +248,12 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
                     if activated && !window.activated {
                         log::info!("window of {} activated", window.app_id);
                         activated_app = Some(window.app_id.clone());
+                        window.last_front = now;
                     }
                     window.activated = activated;
+                }
+                if activated_app.is_some() {
+                    shared.activations = now;
                 }
             }
             handle::Event::Closed => {
@@ -238,5 +266,29 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for State {
         if let Some(app_id) = activated_app {
             (state.on_activated)(&app_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest;
+
+    #[test]
+    fn an_app_comes_back_with_the_window_last_in_front() {
+        let keys = ["com.moonlight_stream.moonlight".to_owned()];
+        // Moonlight's menu first, then its stream window over it.
+        let windows = [
+            ("com.moonlight_stream.Moonlight", 3),
+            ("org.kde.dolphin", 5),
+            ("com.moonlight_stream.Moonlight", 4),
+        ];
+        assert_eq!(newest(windows.into_iter(), &keys), Some(2));
+        // Never in front yet: the first one, as before.
+        let fresh = [
+            ("org.kde.dolphin", 0),
+            ("com.moonlight_stream.Moonlight", 0),
+        ];
+        assert_eq!(newest(fresh.into_iter(), &keys), Some(1));
+        assert_eq!(newest([("org.kde.dolphin", 9)].into_iter(), &keys), None);
     }
 }
