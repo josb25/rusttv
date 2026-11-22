@@ -1,8 +1,9 @@
 //! The device's settings on Linux (device.rs), through the system's own
 //! tools, each only where it is installed: `wpctl` (PipeWire/WirePlumber)
 //! for audio, `nmcli` (NetworkManager) for networks, `bluetoothctl` for
-//! Bluetooth and `systemctl` to restart or power off. Facts for About come
-//! from `/etc/os-release`, `/proc` and `/sys`. A device's own controls (a
+//! Bluetooth, `systemctl` to restart or power off and `tailscale` for
+//! Tailscale (device/tailscale.rs). Facts for About come from
+//! `/etc/os-release`, `/proc` and `/sys`. A device's own controls (a
 //! projector's lens focus) come from its device files (`device_file`).
 //!
 //! Every method blocks on a tool (at most [`TOOL_TIMEOUT`]); the launcher
@@ -14,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod net;
+mod tailscale;
 
 use super::device_file::{self, DeviceControls, Input, SideRow};
 use super::program_exists;
@@ -120,6 +122,7 @@ pub struct LinuxDevice {
     nmcli: bool,
     bluetoothctl: bool,
     systemctl: bool,
+    tailscale: bool,
     /// Another system to restart into (dual boot).
     other_os: Option<OtherOs>,
     /// Whether a Bluetooth search ran: Devices then lists what it found.
@@ -141,6 +144,7 @@ impl LinuxDevice {
             nmcli: program_exists("nmcli"),
             bluetoothctl: program_exists("bluetoothctl"),
             systemctl: program_exists("systemctl"),
+            tailscale: program_exists("tailscale"),
             other_os: read_root_only(OTHER_OS).and_then(|text| parse_other_os(&text)),
             scanned: std::sync::Arc::default(),
             controls: std::sync::Arc::new(DeviceControls::load(
@@ -387,7 +391,7 @@ impl LinuxDevice {
 }
 
 impl DeviceSettings for LinuxDevice {
-    /// Sound and Network, as in their quick panels.
+    /// Sound and Network, as in their quick panels, Devices and Tailscale.
     fn tabs(&self) -> Vec<Tab> {
         let mut tabs = Vec::new();
         if let Some(mut audio) = self.audio() {
@@ -403,6 +407,9 @@ impl DeviceSettings for LinuxDevice {
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             run(program, &args).ok()
         }));
+        if self.tailscale {
+            tabs.extend(tailscale::tab());
+        }
         tabs
     }
 
@@ -419,6 +426,11 @@ impl DeviceSettings for LinuxDevice {
             let (program, args) = command.split_first().ok_or("no command")?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             return run(program, &args).map(drop);
+        }
+        if tab == tailscale::TAB
+            && let Some(result) = tailscale::set(control, &value)
+        {
+            return result;
         }
         let on_off = |on: bool| if on { "on" } else { "off" };
         match (control, value) {

@@ -120,6 +120,9 @@ pub enum ControlKind {
     /// [`Value::Corners`]. `points` is x, y of top left, top right, bottom
     /// left and bottom right, in pixels.
     Corners { points: [i32; 8], size: [i32; 2] },
+    /// Shows `detail` (a link, such as a sign-in page) and, beside the
+    /// rows, as a QR code to open on a phone. One per tab.
+    Code,
 }
 
 impl Control {
@@ -433,7 +436,7 @@ impl PanelPage {
 }
 
 /// A made-up device for the desktop dev mode and tests: a Display tab with
-/// every kind of control, and the three quick panels, kept in memory.
+/// every kind of control (and a sign-in link as a QR code), and the three quick panels, kept in memory.
 #[cfg(any(test, feature = "test-util"))]
 #[derive(Debug, Default)]
 pub struct FakeDevice {
@@ -525,6 +528,12 @@ impl DeviceSettings for FakeDevice {
                         points: state.keystone,
                         size: [1920, 1080],
                     },
+                ),
+                control(
+                    "sign-in",
+                    "Scan to sign in",
+                    "https://example.com/sign-in",
+                    ControlKind::Code,
                 ),
             ],
         }]

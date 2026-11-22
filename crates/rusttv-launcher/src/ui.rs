@@ -1069,6 +1069,12 @@ struct Controller {
     corners_queued: Option<(String, String, [i32; 8])>,
     /// Why the device refused the last change, shown on the view.
     corners_status: String,
+    /// The link Settings shows as a QR code (a platform tab's
+    /// `ControlKind::Code`); empty for none.
+    settings_code: String,
+    /// Reads the platform's tabs again while a code is shown, so it goes
+    /// once the phone has used it.
+    code_timer: Timer,
 }
 
 impl Controller {
@@ -1236,6 +1242,8 @@ impl Controller {
                 corners: None,
                 corners_queued: None,
                 corners_status: String::new(),
+                settings_code: String::new(),
+                code_timer: Timer::default(),
             })
         });
         *controller.borrow().options.lifecycle.0.borrow_mut() = Rc::downgrade(&controller);
@@ -6585,6 +6593,37 @@ mod tests {
         screen.lifecycle.home();
         screen.wait(1);
         assert_eq!(screen.shared.platform.borrow().left().len(), 1);
+    }
+
+    #[test]
+    fn a_link_row_shows_as_a_qr_code_beside_its_tab_only() {
+        let screen = screen_with(abc().with_device(), None);
+        click_settings(&screen.window);
+        settle(&screen);
+        assert_eq!(screen.window.get_settings_code().size().width, 0);
+        let display = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section.title == "Display")
+            .unwrap();
+        for _ in 0..display {
+            screen.tap(DOWN);
+        }
+        assert!(
+            screen.window.get_settings_code().size().width > 100,
+            "the Display tab has a sign-in link"
+        );
+        let rows: Vec<SharedString> = screen
+            .window
+            .get_settings_rows()
+            .iter()
+            .map(|row| row.detail)
+            .collect();
+        assert!(rows.contains(&SharedString::from("https://example.com/sign-in")));
+        // About, below it, has none.
+        screen.tap(DOWN);
+        assert_eq!(screen.window.get_settings_code().size().width, 0);
     }
 
     #[test]

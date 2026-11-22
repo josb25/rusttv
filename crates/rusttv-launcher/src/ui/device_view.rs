@@ -117,7 +117,8 @@ pub(super) fn control_row(window: &HomeWindow, control: &Control) -> SettingsRow
         ControlKind::Action
         | ControlKind::Text { .. }
         | ControlKind::Info
-        | ControlKind::Corners { .. } => {}
+        | ControlKind::Corners { .. }
+        | ControlKind::Code => {}
     }
     row
 }

@@ -1005,6 +1005,9 @@ export component HomeWindow inherits Window {
     in property <bool> settings-loading;
     in property <string> settings-note;
     in property <[SettingsRow]> settings-rows;
+    // A platform tab's link as a QR code beside its rows (a sign-in page
+    // to open on a phone; device.rs `ControlKind::Code`); empty for none.
+    in property <image> settings-code;
     // The first row shown (long lists scroll by rows).
     in property <int> settings-first-row;
     in property <string> settings-status;
@@ -1751,7 +1754,7 @@ export component HomeWindow inherits Window {
                 }
             }
         }
-        Rectangle {
+        settings-panel := Rectangle {
             x: Dir.x(720 * u, self.width, root.width);
             y: 260 * u;
             width: 1110 * u;
@@ -1771,10 +1774,27 @@ export component HomeWindow inherits Window {
                 color: Theme.text;
                 overflow: elide;
             }
+            property <length> code-room: settings-code.width > 0 ? 368 * u : 0;
+            if settings-code.width > 0: Rectangle {
+                x: Dir.x(parent.width - 368 * u, self.width, parent.width);
+                y: 96 * u;
+                width: 320 * u;
+                height: 320 * u;
+                border-radius: 12 * u;
+                background: white;
+                clip: true;
+
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: settings-code;
+                    image-rendering: pixelated;
+                }
+            }
             note := Text {
                 x: Dir.x(48 * u, self.width, parent.width);
                 y: 88 * u;
-                width: parent.width - 96 * u;
+                width: parent.width - 96 * u - settings-panel.code-room;
                 horizontal-alignment: Dir.start;
                 text: settings-note;
                 font-size: 25 * u;
@@ -1788,9 +1808,9 @@ export component HomeWindow inherits Window {
                 property <length> pitch: (settings-rows.length > 0 && (settings-rows[0].detail != "" || settings-rows[0].slider) ? 104 : 72) * u;
                 // Rows of the platform's tabs can be sliders (quick.slint).
                 for row[i] in settings-rows: ControlRow {
-                    x: 24 * u;
+                    x: Dir.x(24 * u, self.width, parent.width);
                     y: (i - settings-first-row) * parent.pitch;
-                    width: parent.width - 48 * u;
+                    width: parent.width - 48 * u - settings-panel.code-room;
                     u: root.u;
                     rtl: Dir.rtl;
                     text: row.title;
@@ -1804,9 +1824,9 @@ export component HomeWindow inherits Window {
                     visible: i >= settings-first-row;
                 }
                 for row[i] in settings-rows: TouchArea {
-                    x: 24 * u;
+                    x: Dir.x(24 * u, self.width, parent.width);
                     y: (i - settings-first-row) * parent.pitch;
-                    width: parent.width - 48 * u;
+                    width: parent.width - 48 * u - settings-panel.code-room;
                     height: parent.pitch;
                     visible: i >= settings-first-row;
                     pointer-event(event) => {

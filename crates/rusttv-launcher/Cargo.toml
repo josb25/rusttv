@@ -86,7 +86,9 @@ reis = { version = "0.7.1", features = ["calloop"], optional = true }
 enumflags2 = { version = "0.7.12", optional = true }
 evdev = { version = "0.13.2", default-features = false, optional = true }
 # Reads `pw-dump` to mute kept-running apps in the background
-# (src/linux/audio.rs). Already in the tree via rusttv-remote.
+# (src/linux/audio.rs) and `tailscale status --json` for Settings →
+# Tailscale (src/linux/device/tailscale.rs). Already in the tree via
+# rusttv-remote.
 serde_json = { workspace = true, optional = true }
 
 # On the TV: the Android backend (always renders with Skia) and the JNI bridge.

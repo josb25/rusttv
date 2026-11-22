@@ -11,13 +11,16 @@ use std::time::Duration;
 use rusttv_history::door::ApprovedChange;
 use rusttv_history::tv::{ApplyOutcome, Refused};
 use rusttv_history::{Author, Change, PackageState, SETTING_KEYS, State, diff};
-use slint::{ComponentHandle, Model, SharedString, Timer, TimerMode};
+use slint::{
+    ComponentHandle, Image, Model, Rgba8Pixel, SharedPixelBuffer, SharedString, Timer, TimerMode,
+};
 
 use super::{
     AboutListRow, Controller, HistoryListRow, HistoryPanel, HomeWindow, ReviewLine, SettingsRow,
     Strings,
 };
 use crate::corners::CornerEdit;
+use crate::device::ControlKind;
 use crate::history::History;
 use crate::model::Input;
 use crate::order_file;
@@ -31,6 +34,13 @@ const PACK_AFTER: Duration = Duration::from_secs(5);
 
 /// Panel rows visible at once (the rest scroll by rows).
 const PANEL_ROWS: usize = 6;
+
+/// Pixels per module of a Settings QR code; Slint scales it to the panel.
+const CODE_SCALE: usize = 8;
+
+/// How often Settings reads the platform's tabs again while a QR code is
+/// shown (a sign-in on a phone changes the tab).
+const CODE_EVERY: Duration = Duration::from_secs(3);
 
 /// Review lines visible at once.
 const REVIEW_ROWS: usize = 8;
@@ -816,6 +826,18 @@ impl Controller {
                 };
                 (title, rows, page.panel_row())
             };
+        let code = match page.section() {
+            Section::Tab(index) if page.detail().is_none() => page
+                .tabs()
+                .get(index)
+                .and_then(|tab| {
+                    tab.controls
+                        .iter()
+                        .find(|control| control.kind == ControlKind::Code)
+                })
+                .map(|control| control.detail.clone()),
+            _ => None,
+        };
         window.set_settings_panel_title(title);
         window.set_settings_note(note.join("\n").into());
         let first = focused.map_or(0, |row| row.saturating_sub(PANEL_ROWS - 1));
@@ -824,6 +846,46 @@ impl Controller {
         if !self.settings_rows.iter().eq(rows.iter().cloned()) {
             self.settings_rows.set_vec(rows);
         }
+        self.show_settings_code(window, code.as_deref().unwrap_or_default());
+    }
+
+    /// Shows `link` as a QR code beside the rows (empty: none), and reads
+    /// the platform's tabs again every [`CODE_EVERY`] while it is shown.
+    fn show_settings_code(&mut self, window: &HomeWindow, link: &str) {
+        if link == self.settings_code {
+            return;
+        }
+        link.clone_into(&mut self.settings_code);
+        let image = if link.is_empty() {
+            None
+        } else {
+            crate::remote::qr_pixels(link, CODE_SCALE).map(|(side, pixels)| {
+                Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(
+                    &pixels, side, side,
+                ))
+            })
+        };
+        window.set_settings_code(image.unwrap_or_default());
+        if link.is_empty() {
+            self.code_timer.stop();
+            return;
+        }
+        let me = self.me.clone();
+        self.code_timer
+            .start(TimerMode::Repeated, CODE_EVERY, move || {
+                let Some(controller) = me.upgrade() else {
+                    return;
+                };
+                let Ok(mut controller) = controller.try_borrow_mut() else {
+                    return;
+                };
+                if controller.settings.is_none() {
+                    controller.settings_code.clear();
+                    controller.code_timer.stop();
+                } else {
+                    controller.refresh_device_tabs();
+                }
+            });
     }
 
     /// A row of the About tab: RustTV (About's row face, PANELS.md § 4),
