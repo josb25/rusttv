@@ -4,7 +4,7 @@
 // and forwards keys.
 
 import { AboutSlint } from "std-widgets.slint";
-import { SettingsRow, ControlRow, QuickBar, QuickPanel, PowerMenu, TextPromptView, VolumeOsd } from "quick.slint";
+import { SettingsRow, ControlRow, QuickBar, QuickPanel, PowerMenu, TextPromptView, VolumeOsd, CornersView } from "quick.slint";
 
 // The hero backdrop: a dark base and a soft glow of the app's main colour
 // (platform.rs `Glow`); x and y place the glow, 0..1 of the screen.
@@ -789,6 +789,15 @@ export component HomeWindow inherits Window {
     in-out property <string> prompt-text;
     callback prompt-done(string);
     callback prompt-cancelled();
+    // The full-screen keystone view (quick.slint `CornersView`,
+    // ui/corners_view.rs).
+    in property <bool> corners-shown;
+    in property <string> corners-title;
+    in property <int> corners-focus;
+    in property <[string]> corners-offsets;
+    in property <string> corners-status;
+    callback corners-pointer(int, float, float);
+    callback corners-button(bool, bool);
     // The volume bar (ui/device_view.rs `show_volume`).
     in property <bool> volume-shown;
     in property <float> volume-level;
@@ -1992,6 +2001,20 @@ export component HomeWindow inherits Window {
         text <=> root.prompt-text;
         done(text) => { root.prompt-done(text); }
         cancelled => { root.prompt-cancelled(); }
+    }
+
+    // The keystone view, over everything but the volume bar.
+    if corners-shown: CornersView {
+        width: root.width;
+        height: root.height;
+        u: root.u;
+        title: corners-title;
+        marked: corners-focus;
+        offsets: corners-offsets;
+        status: corners-status;
+        pointer-shown: Pointer.shown;
+        pointer(action, x, y) => { root.corners-pointer(action, x, y); }
+        button(done, clicked) => { root.corners-button(done, clicked); }
     }
 
     // The volume bar, over everything (ui/device_view.rs).

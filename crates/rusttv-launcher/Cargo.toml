@@ -28,6 +28,7 @@ linux = [
     "dep:reis",
     "dep:resvg",
     "dep:rustix",
+    "dep:serde_json",
     "dep:wayland-client",
     "dep:wayland-protocols-misc",
     "dep:wayland-protocols-wlr",
@@ -74,6 +75,9 @@ calloop = { version = "0.14.5", optional = true }
 reis = { version = "0.7.1", features = ["calloop"], optional = true }
 enumflags2 = { version = "0.7.12", optional = true }
 evdev = { version = "0.13.2", default-features = false, optional = true }
+# Reads `pw-dump` to mute kept-running apps in the background
+# (src/linux/audio.rs). Already in the tree via rusttv-remote.
+serde_json = { workspace = true, optional = true }
 
 # Desktop dev mode: window via winit, CPU rendering (no Skia download).
 [target.'cfg(not(target_os = "android"))'.dependencies]

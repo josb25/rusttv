@@ -554,3 +554,167 @@ export component TextPromptView inherits Rectangle {
         overflow: elide;
     }
 }
+
+// One corner's marker of `CornersView`: an L along the screen's corner.
+component CornerMark inherits Rectangle {
+    in property <length> u;
+    in property <bool> right;
+    in property <bool> bottom;
+    in property <bool> active;
+    property <length> arm: 150 * u;
+    property <length> thick: active ? 14 * u : 8 * u;
+    property <color> ink: active ? Colours.accent : Colours.text;
+
+    width: arm;
+    height: arm;
+    Rectangle {
+        x: right ? parent.width - self.width : 0;
+        y: bottom ? parent.height - thick : 0;
+        width: arm;
+        height: thick;
+        background: ink;
+    }
+    Rectangle {
+        x: right ? parent.width - thick : 0;
+        y: bottom ? parent.height - self.height : 0;
+        width: thick;
+        height: arm;
+        background: ink;
+    }
+}
+
+// The full-screen view of a corners control: a projector's keystone
+// (src/corners.rs, src/ui/corners_view.rs). A grid fills the screen so the
+// warped picture shows how straight it is; the focused corner is marked.
+export component CornersView inherits Rectangle {
+    in property <length> u;
+    in property <string> title;
+    // 0 top left, 1 top right, 2 bottom left, 3 bottom right, 4 Reset, 5 Done.
+    in property <int> marked;
+    // Each corner's offset ("+40, +20"); empty where it hasn't moved.
+    in property <[string]> offsets;
+    in property <string> status;
+    // The mouse pointer is in use (home.slint `Pointer.shown`).
+    in property <bool> pointer-shown;
+    // `action` 0 hover, 1 press, 2 drag, 3 release, at fractions of the screen.
+    callback pointer(/* action */ int, /* x */ float, /* y */ float);
+    // The pointer over Reset (`done` false) or Done; `clicked` a click.
+    callback button(/* done */ bool, /* clicked */ bool);
+
+    background: Colours.bg;
+
+    // The grid: 16 × 9 squares, and the centre lines brighter.
+    for i in 17: Rectangle {
+        x: i * (root.width - 2 * u) / 16;
+        width: 2 * u;
+        height: root.height;
+        background: i == 8 ? Colours.text.with-alpha(0.5) : Colours.text.with-alpha(0.18);
+    }
+    for i in 10: Rectangle {
+        y: i * (root.height - 2 * u) / 9;
+        width: root.width;
+        height: 2 * u;
+        background: Colours.text.with-alpha(0.18);
+    }
+    Rectangle {
+        y: (root.height - 2 * u) / 2;
+        width: root.width;
+        height: 2 * u;
+        background: Colours.text.with-alpha(0.5);
+    }
+
+    TouchArea {
+        mouse-cursor: root.pointer-shown ? MouseCursor.default : MouseCursor.none;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.move {
+                root.pointer(self.pressed ? 2 : 0, self.mouse-x / root.width, self.mouse-y / root.height);
+            } else if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                root.pointer(1, self.mouse-x / root.width, self.mouse-y / root.height);
+            } else if event.kind == PointerEventKind.up && event.button == PointerEventButton.left {
+                root.pointer(3, self.mouse-x / root.width, self.mouse-y / root.height);
+            }
+        }
+    }
+
+    for corner in 4: CornerMark {
+        x: mod(corner, 2) == 1 ? root.width - self.width : 0;
+        y: corner >= 2 ? root.height - self.height : 0;
+        u: root.u;
+        right: mod(corner, 2) == 1;
+        bottom: corner >= 2;
+        active: root.marked == corner;
+    }
+    for corner in 4: Text {
+        x: mod(corner, 2) == 1 ? root.width - 180 * u - self.width : 180 * u;
+        y: corner >= 2 ? root.height - 180 * u - self.height : 180 * u;
+        text: offsets[corner];
+        font-size: 32 * u;
+        color: root.marked == corner ? Colours.accent : Colours.text;
+    }
+
+    // The middle: what this is and how to use it.
+    Rectangle {
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        width: 1000 * u;
+        height: 420 * u;
+        border-radius: 20 * u;
+        background: Colours.surface.with-alpha(0.92);
+
+        Text {
+            y: 40 * u;
+            width: parent.width;
+            horizontal-alignment: center;
+            text: root.title;
+            font-size: 44 * u;
+            color: Colours.text;
+        }
+        Text {
+            x: 60 * u;
+            y: 120 * u;
+            width: parent.width - 120 * u;
+            horizontal-alignment: center;
+            text: @tr("Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer.");
+            font-size: 28 * u;
+            color: Colours.text-dim;
+            wrap: word-wrap;
+        }
+        Text {
+            x: 60 * u;
+            y: 250 * u;
+            width: parent.width - 120 * u;
+            horizontal-alignment: center;
+            text: root.status;
+            font-size: 26 * u;
+            color: Colours.accent;
+            overflow: elide;
+        }
+        for button in 2: Rectangle {
+            x: parent.width / 2 + (button == 0 ? -self.width - 20 * u : 20 * u);
+            y: parent.height - self.height - 40 * u;
+            width: 260 * u;
+            height: 76 * u;
+            border-radius: 38 * u;
+            property <bool> focused: root.marked == (button == 0 ? 4 : 5);
+            background: focused ? Colours.text : Colours.text.with-alpha(0.12);
+            Text {
+                width: parent.width;
+                height: parent.height;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                text: button == 0 ? @tr("Reset") : @tr("Done");
+                font-size: 30 * u;
+                font-weight: 600;
+                color: focused ? Colours.bg : Colours.text;
+            }
+            TouchArea {
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.move {
+                        root.button(button == 1, false);
+                    }
+                }
+                clicked => { root.button(button == 1, true); }
+            }
+        }
+    }
+}

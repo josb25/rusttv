@@ -107,7 +107,10 @@ pub(super) fn control_row(window: &HomeWindow, control: &Control) -> SettingsRow
         }
         ControlKind::Nudge => row.detail = given("‹  ›".to_owned()),
         ControlKind::Heading => row.heading = true,
-        ControlKind::Action | ControlKind::Text { .. } | ControlKind::Info => {}
+        ControlKind::Action
+        | ControlKind::Text { .. }
+        | ControlKind::Info
+        | ControlKind::Corners { .. } => {}
     }
     row
 }
@@ -231,13 +234,16 @@ impl Controller {
                 controller.device_pending = controller.device_pending.saturating_sub(1);
                 if let Err(reason) = result {
                     log::warn!("changing a setting failed: {reason}");
-                    if controller.quick.is_some() {
+                    if controller.corners.is_some() {
+                        controller.corners_status = reason;
+                    } else if controller.quick.is_some() {
                         controller.quick_status = reason;
                     } else {
                         controller.settings_failed(reason);
                     }
                 }
-                if controller.device_pending == 0 {
+                controller.corners_flush();
+                if controller.device_pending == 0 && controller.corners.is_none() {
                     controller.refresh_quick();
                     controller.refresh_device_tabs();
                 }

@@ -111,6 +111,15 @@ pub(crate) enum Action {
         title: String,
         secret: bool,
     },
+    /// Open the full-screen view of a [`ControlKind::Corners`]
+    /// (corners.rs), which sends its points to the device as it goes.
+    AskCorners {
+        tab: String,
+        control: String,
+        title: String,
+        points: [i32; 8],
+        size: [i32; 2],
+    },
     /// Install the available launcher update, else check for one.
     Update,
     /// Open the licence and third-party notices (the About page).
@@ -468,6 +477,16 @@ impl SettingsPage {
                 title: control.label.clone(),
                 secret: matches!(control.kind, ControlKind::Text { secret: true }),
             })),
+            Adjust::AskCorners => match control.kind {
+                ControlKind::Corners { points, size } => Some(Some(Action::AskCorners {
+                    tab: tab.id.clone(),
+                    control: control.id.clone(),
+                    title: control.label.clone(),
+                    points,
+                    size,
+                })),
+                _ => Some(None),
+            },
         }
     }
 

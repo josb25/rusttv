@@ -8,6 +8,7 @@
 //! SVG). Updates are the system package
 //! manager's job, so the launcher's updater does nothing here.
 
+mod audio;
 mod device;
 mod device_file;
 mod gamepad;
@@ -111,7 +112,7 @@ fn watch_input(command: Vec<String>, events: AppEvents) {
                                 let Ok(line) = line else { break };
                                 log::info!("video input: {line}");
                                 let (now, switch) = input_change(signal, &line);
-                                signal = Some(now);
+                                signal = now;
                                 if switch {
                                     events(AppEvent::InputSignal);
                                 }
@@ -133,11 +134,17 @@ fn watch_input(command: Vec<String>, events: AppEvents) {
 }
 
 /// A line of the video input's watcher after `before` (whether a picture
-/// arrived when last heard, `None` at start): whether one arrives now,
-/// and whether to switch to it (only when it newly arrives).
-fn input_change(before: Option<bool>, line: &str) -> (bool, bool) {
+/// arrived when last heard, `None` at start or while the input was
+/// unknown): whether one arrives now (`None`: unknown, "absent"), and
+/// whether to switch to it (only when it newly arrives after a line that
+/// said none did; a picture already there when the input becomes known
+/// doesn't switch, e.g. while the device starts).
+fn input_change(before: Option<bool>, line: &str) -> (Option<bool>, bool) {
+    if device_file::is_absent(line) {
+        return (None, false);
+    }
     let now = device_file::has_signal(line);
-    (now, now && before == Some(false))
+    (Some(now), now && before == Some(false))
 }
 
 /// Where packages put the launcher's licence notices.
@@ -237,8 +244,12 @@ impl LinuxPlatform {
     pub fn with_tasks(mut self, limits: Limits) -> Self {
         let tasks = Tasks::start(limits);
         let used = tasks.clone();
-        self.windows = Toplevels::start(Box::new(move |app_id| {
+        self.windows = Toplevels::start(Box::new(move |app_id, open| {
             use std::sync::atomic::Ordering;
+            let Some(app_id) = app_id else {
+                used.window_closed(open);
+                return;
+            };
             // The home screen's own window has no app ID.
             let home = app_id.is_empty() || app_id.to_lowercase().contains("rusttv");
             gamepad::HOME_IN_FRONT.store(home, Ordering::Relaxed);
@@ -246,7 +257,7 @@ impl LinuxPlatform {
             if !home {
                 keyboard::window_switched();
             }
-            let reads_pads = used.activated(app_id);
+            let reads_pads = used.activated(app_id, open);
             gamepad::KEYS_TO_APP.store(reads_pads == Some(false), Ordering::Relaxed);
         }));
         self.tasks = Some(tasks);
@@ -474,7 +485,14 @@ impl Platform for LinuxPlatform {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        if let Some(dir) = &entry.working_dir {
+        // Apps start in their entry's Path, else at home, as a desktop's
+        // menu starts them: not in whatever directory the launcher was
+        // started from (a terminal's shell can't open one it may not enter).
+        if let Some(dir) = entry
+            .working_dir
+            .clone()
+            .or_else(|| std::env::var_os("HOME").map(Into::into))
+        {
             command.current_dir(dir);
         }
         let percent = self.app_scale(id);
@@ -648,7 +666,9 @@ impl Platform for LinuxPlatform {
             return Some(id);
         }
         // An app left running by an earlier launcher, in front.
-        let app_id = self.windows.as_ref()?.front()?.to_lowercase();
+        let windows = self.windows.as_ref()?;
+        let app_id = windows.front()?.to_lowercase();
+        let open = windows.app_ids();
         let entries = self.entries.borrow();
         let (id, entry) = entries
             .iter()
@@ -657,7 +677,7 @@ impl Platform for LinuxPlatform {
             return None;
         }
         if let Some(tasks) = &self.tasks {
-            tasks.activated(&app_id);
+            tasks.activated(&app_id, &open);
         }
         Some(id.clone())
     }
@@ -1260,18 +1280,27 @@ mod tests {
     #[test]
     fn only_a_newly_arriving_picture_switches() {
         // Already there at start: no switch.
-        assert_eq!(input_change(None, "signal 1920x1080@60"), (true, false));
-        assert_eq!(input_change(None, "no-signal"), (false, false));
+        assert_eq!(
+            input_change(None, "signal 1920x1080@60"),
+            (Some(true), false)
+        );
+        assert_eq!(input_change(None, "no-signal"), (Some(false), false));
         assert_eq!(
             input_change(Some(false), "signal 1920x1080@60"),
-            (true, true)
+            (Some(true), true)
         );
         assert_eq!(
             input_change(Some(true), "signal 1280x720@60"),
-            (true, false)
+            (Some(true), false)
         );
-        assert_eq!(input_change(Some(true), "no-signal"), (false, false));
-        assert_eq!(input_change(Some(false), "absent"), (false, false));
+        assert_eq!(input_change(Some(true), "no-signal"), (Some(false), false));
+        // The input unknown (its service starting): what follows doesn't
+        // count as newly arriving.
+        assert_eq!(input_change(Some(false), "absent"), (None, false));
+        assert_eq!(
+            input_change(None, "signal 1920x1080@60"),
+            (Some(true), false)
+        );
     }
 
     #[test]

@@ -26,6 +26,21 @@
 //! # Run as the launcher's user, without a shell.
 //! left = ["hy320f-focus", "down"]
 //! right = ["hy320f-focus", "up"]
+//!
+//! [[tab.control]]
+//! id = "keystone"
+//! label = "Keystone"
+//! labels = { de = "Trapezkorrektur" }
+//! # Four corners: OK opens a full-screen view to move them.
+//! kind = "corners"
+//! # The screen, in the pixels the commands count in.
+//! size = [1920, 1080]
+//! # Prints the corners, 8 numbers: x y of top left, top right, bottom
+//! # left, bottom right.
+//! get = ["hy320f-keystone", "get"]
+//! # Gets the 8 numbers added; fails (with a reason on stderr) for
+//! # corners it can't use.
+//! set = ["hy320f-keystone", "set"]
 //! ```
 //!
 //! A device with a video input (HDMI) names it, and the launcher puts it
@@ -40,8 +55,10 @@
 //! # `NoDisplay=true` is fine).
 //! app = "hy320f-hdmi.desktop"
 //! # Runs while the launcher does: prints a line whenever the input
-//! # changes, "signal ..." while a source sends a picture, anything else
-//! # while none does. A new "signal" opens the input.
+//! # changes, "signal ..." while a source sends a picture, "absent" while
+//! # the input is unknown (its service not running), anything else while
+//! # no picture arrives. A "signal" after a line without one opens the
+//! # input; after "absent" (or at start) it doesn't.
 //! watch = ["hy320f-hdmi", "watch"]
 //! ```
 //!
@@ -52,7 +69,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::device::{Control, ControlKind, Tab};
+use crate::device::{Control, ControlKind, Tab, Value};
 
 /// Where device files are.
 pub const DIR: &str = "/etc/rusttv/device.d";
@@ -97,6 +114,12 @@ pub fn has_signal(line: &str) -> bool {
     line.split_whitespace().next() == Some("signal")
 }
 
+/// Whether a line of an input's `watch` command says the input is unknown
+/// ("absent": its driver or service isn't there, e.g. still starting).
+pub fn is_absent(line: &str) -> bool {
+    line.trim() == "absent"
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileTab {
@@ -123,16 +146,39 @@ struct FileControl {
     side_menu: bool,
     #[serde(default)]
     keys: Option<[u32; 2]>,
+    /// A nudge's commands.
+    #[serde(default)]
     left: Vec<String>,
+    #[serde(default)]
     right: Vec<String>,
+    /// A corners control's screen and commands.
+    #[serde(default)]
+    size: Option<[i32; 2]>,
+    #[serde(default)]
+    get: Vec<String>,
+    #[serde(default)]
+    set: Vec<String>,
 }
 
-/// What a device file's control is (only nudges so far).
+/// What a device file's control is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Kind {
     /// [`ControlKind::Nudge`].
     Nudge,
+    /// [`ControlKind::Corners`].
+    Corners,
+}
+
+/// A corners control's points as its `get` command prints them: 8
+/// numbers; `None` otherwise.
+pub fn parse_corners(text: &str) -> Option<[i32; 8]> {
+    let numbers: Vec<i32> = text
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    numbers.try_into().ok()
 }
 
 /// A control the side menu over apps shows.
@@ -216,8 +262,10 @@ impl DeviceControls {
         })
     }
 
-    /// The Settings tabs, in the UI's language.
-    pub fn tabs(&self) -> Vec<Tab> {
+    /// The Settings tabs, in the UI's language. `read` runs a corners
+    /// control's `get` command and returns what it printed; without an
+    /// answer it shows the full screen.
+    pub fn tabs(&self, read: impl Fn(&[String]) -> Option<String>) -> Vec<Tab> {
         self.tabs
             .iter()
             .map(|tab| Tab {
@@ -230,8 +278,15 @@ impl DeviceControls {
                         id: control.id.clone(),
                         label: self.pick(&control.label, &control.labels),
                         detail: String::new(),
-                        kind: match control.kind {
-                            Kind::Nudge => ControlKind::Nudge,
+                        kind: match (control.kind, control.size) {
+                            (Kind::Corners, Some(size)) => {
+                                let [w, h] = size;
+                                let points = read(&control.get)
+                                    .and_then(|text| parse_corners(&text))
+                                    .unwrap_or([0, 0, w - 1, 0, 0, h - 1, w - 1, h - 1]);
+                                ControlKind::Corners { points, size }
+                            }
+                            (Kind::Nudge | Kind::Corners, _) => ControlKind::Nudge,
                         },
                     })
                     .collect(),
@@ -239,15 +294,27 @@ impl DeviceControls {
             .collect()
     }
 
-    /// The command that steps control `id` of tab `tab` (`step` > 0:
-    /// right); `None` if no device file has it.
-    pub fn command(&self, tab: &str, id: &str, step: i32) -> Option<&[String]> {
+    /// The command that gives control `id` of tab `tab` this value: a
+    /// nudge's side (`Step` > 0: right), a corners control's `set` with
+    /// the numbers; `None` if no device file has it, or not for that value.
+    pub fn command(&self, tab: &str, id: &str, value: &Value) -> Option<Vec<String>> {
         let control = self.find(tab, id)?;
-        Some(if step > 0 {
-            &control.right
-        } else {
-            &control.left
-        })
+        match (control.kind, value) {
+            (Kind::Nudge, Value::Step(step)) => Some(if *step > 0 {
+                control.right.clone()
+            } else {
+                control.left.clone()
+            }),
+            (Kind::Corners, Value::Corners(points)) => Some(
+                control
+                    .set
+                    .iter()
+                    .cloned()
+                    .chain(points.iter().map(i32::to_string))
+                    .collect(),
+            ),
+            _ => None,
+        }
     }
 
     /// Whether control `id` of tab `tab` shows the test pattern.
@@ -314,11 +381,24 @@ fn parse(text: &str) -> Result<File, String> {
                     tab.id
                 ));
             }
-            if control.left.is_empty() || control.right.is_empty() {
-                return Err(format!(
-                    "control {} needs left and right commands",
-                    control.id
-                ));
+            match control.kind {
+                Kind::Nudge if control.left.is_empty() || control.right.is_empty() => {
+                    return Err(format!(
+                        "control {} needs left and right commands",
+                        control.id
+                    ));
+                }
+                Kind::Corners
+                    if control.get.is_empty()
+                        || control.set.is_empty()
+                        || control.size.is_none_or(|[w, h]| w < 2 || h < 2) =>
+                {
+                    return Err(format!(
+                        "control {} needs get and set commands and a size",
+                        control.id
+                    ));
+                }
+                Kind::Nudge | Kind::Corners => {}
             }
         }
     }
@@ -371,30 +451,40 @@ mod tests {
 
     #[test]
     fn tabs_and_labels_follow_the_language() {
-        let tabs = controls(Some("de_DE.UTF-8")).tabs();
+        let tabs = controls(Some("de_DE.UTF-8")).tabs(|_| None);
         assert_eq!(tabs.len(), 1);
         assert_eq!(tabs[0].title, "Projektor");
         assert_eq!(tabs[0].controls[0].label, "Fokus");
         assert_eq!(tabs[0].controls[0].kind, ControlKind::Nudge);
         // No translation: the plain text.
         assert_eq!(tabs[0].controls[1].label, "Zoom");
-        assert_eq!(controls(None).tabs()[0].title, "Projector");
-        assert_eq!(controls(Some("fr_FR.UTF-8")).tabs()[0].title, "Projector");
+        assert_eq!(controls(None).tabs(|_| None)[0].title, "Projector");
+        assert_eq!(
+            controls(Some("fr_FR.UTF-8")).tabs(|_| None)[0].title,
+            "Projector"
+        );
     }
 
     #[test]
     fn steps_run_their_side_s_command() {
         let controls = controls(None);
         assert_eq!(
-            controls.command("projector", "focus", 1).unwrap(),
+            controls
+                .command("projector", "focus", &Value::Step(1))
+                .unwrap(),
             ["hy320f-focus", "up"]
         );
         assert_eq!(
-            controls.command("projector", "focus", -1).unwrap(),
+            controls
+                .command("projector", "focus", &Value::Step(-1))
+                .unwrap(),
             ["hy320f-focus", "down"]
         );
-        assert_eq!(controls.command("projector", "brightness", 1), None);
-        assert_eq!(controls.command("sound", "focus", 1), None);
+        assert_eq!(
+            controls.command("projector", "brightness", &Value::Step(1)),
+            None
+        );
+        assert_eq!(controls.command("sound", "focus", &Value::Step(1)), None);
         assert!(controls.pattern("projector", "focus"));
         assert!(!controls.pattern("projector", "zoom"));
     }
@@ -411,6 +501,78 @@ mod tests {
                 keys: Some([202, 203]),
             }]
         );
+    }
+
+    const KEYSTONE: &str = r#"
+        [[tab]]
+        id = "projector"
+        title = "Projector"
+
+        [[tab.control]]
+        id = "keystone"
+        label = "Keystone"
+        kind = "corners"
+        size = [1920, 1080]
+        get = ["hy320f-keystone", "get"]
+        set = ["hy320f-keystone", "set"]
+    "#;
+
+    #[test]
+    fn corners_read_their_points_and_set_them_with_the_numbers() {
+        let mut controls = DeviceControls::default();
+        controls.add(parse(KEYSTONE).unwrap());
+        let tabs = controls.tabs(|command| {
+            assert_eq!(command, ["hy320f-keystone", "get"]);
+            Some(
+                "10 20 1900 0 0 1079 1919 1060
+"
+                .into(),
+            )
+        });
+        assert_eq!(
+            tabs[0].controls[0].kind,
+            ControlKind::Corners {
+                points: [10, 20, 1900, 0, 0, 1079, 1919, 1060],
+                size: [1920, 1080],
+            }
+        );
+        // No answer, or a strange one: the full screen.
+        let full = ControlKind::Corners {
+            points: [0, 0, 1919, 0, 0, 1079, 1919, 1079],
+            size: [1920, 1080],
+        };
+        assert_eq!(controls.tabs(|_| None)[0].controls[0].kind, full);
+        assert_eq!(
+            controls.tabs(|_| Some("1 2 3".into()))[0].controls[0].kind,
+            full
+        );
+        assert_eq!(
+            controls
+                .command(
+                    "projector",
+                    "keystone",
+                    &Value::Corners([1, 2, 3, 4, 5, 6, 7, 8])
+                )
+                .unwrap(),
+            [
+                "hy320f-keystone",
+                "set",
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "6",
+                "7",
+                "8"
+            ]
+        );
+        assert_eq!(
+            controls.command("projector", "keystone", &Value::Step(1)),
+            None
+        );
+        let no_size = KEYSTONE.replace("size = [1920, 1080]", "");
+        assert!(parse(&no_size).is_err());
     }
 
     #[test]
@@ -446,13 +608,13 @@ label = \"HDMI\"
     fn a_tab_described_twice_counts_once() {
         let mut twice = controls(None);
         twice.add(parse(FOCUS).unwrap());
-        assert_eq!(twice.tabs().len(), 1);
+        assert_eq!(twice.tabs(|_| None).len(), 1);
     }
 
     #[test]
     fn a_missing_directory_has_no_controls() {
         let controls = DeviceControls::load(Path::new("/nonexistent/rusttv"), None);
-        assert!(controls.tabs().is_empty());
+        assert!(controls.tabs(|_| None).is_empty());
         assert_eq!(controls.input(), None);
     }
 
@@ -492,5 +654,7 @@ label = \"HDMI\"
         assert!(!has_signal("no-signal"));
         assert!(!has_signal("absent"));
         assert!(!has_signal(""));
+        assert!(is_absent("absent"));
+        assert!(!is_absent("no-signal"));
     }
 }

@@ -113,6 +113,11 @@ pub enum ControlKind {
     /// The title of the rows below it ("Saved networks"); focus passes
     /// over it.
     Heading,
+    /// Four points on a `size` screen (a projector's keystone): OK opens a
+    /// full-screen view to move them (corners.rs), sent as
+    /// [`Value::Corners`]. `points` is x, y of top left, top right, bottom
+    /// left and bottom right, in pixels.
+    Corners { points: [i32; 8], size: [i32; 2] },
 }
 
 impl Control {
@@ -171,6 +176,8 @@ pub enum Value {
     Action,
     /// The text entered for a [`ControlKind::Text`].
     Text(String),
+    /// A [`ControlKind::Corners`]'s new points.
+    Corners([i32; 8]),
 }
 
 /// A volume key.
@@ -259,6 +266,8 @@ pub(crate) enum Adjust {
     Changed(Value),
     /// Ask for a text for this [`ControlKind::Text`] (a text field; the system's on-screen keyboard types into it).
     AskText,
+    /// Open the full-screen view of this [`ControlKind::Corners`].
+    AskCorners,
 }
 
 /// Applies a key to the focused control: OK flips a toggle, chooses an
@@ -278,6 +287,7 @@ pub(crate) fn adjust(control: &mut Control, input: Input, right_to_left: bool) -
         }
         (ControlKind::Action, Input::OkReleased, _) => Adjust::Changed(Value::Action),
         (ControlKind::Text { .. }, Input::OkReleased, _) => Adjust::AskText,
+        (ControlKind::Corners { .. }, Input::OkReleased, _) => Adjust::AskCorners,
         (
             ControlKind::Slider {
                 value,
@@ -391,7 +401,7 @@ impl PanelPage {
                         value,
                     });
                 }
-                Adjust::Kept | Adjust::AskText => return None,
+                Adjust::Kept | Adjust::AskText | Adjust::AskCorners => return None,
                 Adjust::Ignored => {}
             }
         }
@@ -438,6 +448,7 @@ struct FakeState {
     network: Option<String>,
     bluetooth: bool,
     night_light: bool,
+    keystone: [i32; 8],
     /// Every change, as "tab/control=value".
     changes: Vec<String>,
 }
@@ -451,6 +462,7 @@ impl FakeDevice {
                 volume: 40,
                 wifi: true,
                 network: Some("Home".to_owned()),
+                keystone: [0, 0, 1919, 0, 0, 1079, 1919, 1079],
                 ..FakeState::default()
             }),
         }
@@ -503,6 +515,15 @@ impl DeviceSettings for FakeDevice {
                     ControlKind::Text { secret: false },
                 ),
                 control("focus", "Focus", "", ControlKind::Nudge),
+                control(
+                    "keystone",
+                    "Keystone",
+                    "",
+                    ControlKind::Corners {
+                        points: state.keystone,
+                        size: [1920, 1080],
+                    },
+                ),
             ],
         }]
     }
@@ -595,6 +616,7 @@ impl DeviceSettings for FakeDevice {
             ("bluetooth", Value::Toggle(on)) => state.bluetooth = on,
             ("night-light", Value::Toggle(on)) => state.night_light = on,
             ("name", Value::Text(_)) | ("focus", Value::Step(_)) => {}
+            ("keystone", Value::Corners(points)) => state.keystone = points,
             (control, Value::Action) if control.starts_with("connect:") => {
                 state.network = control.strip_prefix("connect:").map(str::to_owned);
             }

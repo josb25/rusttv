@@ -374,7 +374,11 @@ impl DeviceSettings for LinuxDevice {
         // the quick panel); it is there without nmcli too.
         tabs.extend(self.network(Some(&net::details())));
         tabs.extend(self.devices());
-        tabs.extend(self.controls.tabs());
+        tabs.extend(self.controls.tabs(|command| {
+            let (program, args) = command.split_first()?;
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            run(program, &args).ok()
+        }));
         tabs
     }
 
@@ -387,9 +391,7 @@ impl DeviceSettings for LinuxDevice {
     }
 
     fn set(&self, tab: &str, control: &str, value: Value) -> Result<(), String> {
-        if let Value::Step(step) = value
-            && let Some(command) = self.controls.command(tab, control, step)
-        {
+        if let Some(command) = self.controls.command(tab, control, &value) {
             let (program, args) = command.split_first().ok_or("no command")?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             return run(program, &args).map(drop);

@@ -455,3 +455,12 @@ msgstr "Wird geladen…"
 
 msgid "✓ on the keyboard confirms, Back cancels"
 msgstr "✓ auf der Tastatur bestätigt, Zurück bricht ab"
+
+msgid "Reset"
+msgstr "Zurücksetzen"
+
+msgid "Done"
+msgstr "Fertig"
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr "Verschieben Sie jede Ecke, bis die Ränder des Gitters gerade sind. Die Pfeile bewegen die markierte Ecke, OK wechselt zur nächsten. Oder ziehen Sie eine Ecke mit dem Zeiger."

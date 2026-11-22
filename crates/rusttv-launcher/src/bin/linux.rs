@@ -161,16 +161,24 @@ fn deliver(signal: Signal) {
 /// max_apps = 2
 /// # Close background apps while less memory than this (MiB) is available.
 /// min_available_mib = 120
+/// # Close background apps while more swap than this (MiB) is in use
+/// # (off unless set).
+/// max_swap_mib = 100
 /// # Stop apps in the background (they keep their memory, take no CPU);
 /// # also pauses music playing in them.
 /// freeze_background = true
+/// # Apps never stopped in the background, and closed for memory last
+/// # (desktop file IDs). A stopped game stream ends.
+/// keep_running = ["com.moonlight_stream.Moonlight", "com.valvesoftware.SteamLink"]
 /// ```
 #[derive(Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
     max_apps: Option<usize>,
     min_available_mib: Option<u64>,
+    max_swap_mib: Option<u64>,
     freeze_background: bool,
+    keep_running: Vec<String>,
 }
 
 impl Default for Config {
@@ -178,7 +186,12 @@ impl Default for Config {
         Self {
             max_apps: Some(3),
             min_available_mib: Some(120),
+            max_swap_mib: None,
             freeze_background: true,
+            keep_running: vec![
+                "com.moonlight_stream.Moonlight".to_owned(),
+                "com.valvesoftware.SteamLink".to_owned(),
+            ],
         }
     }
 }
@@ -356,7 +369,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let limits = Limits {
         max_apps: config.max_apps,
         min_available_mib: config.min_available_mib,
+        max_swap_mib: config.max_swap_mib,
         freeze_background: config.freeze_background,
+        keep_running: config.keep_running,
     };
     log::info!("app limits: {limits:?}");
     // The launcher's keyboard for text fields in other apps.

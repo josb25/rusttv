@@ -587,3 +587,12 @@ msgstr ""
 
 msgid "The app restarts at the new size"
 msgstr ""
+
+msgid "Reset"
+msgstr ""
+
+msgid "Done"
+msgstr ""
+
+msgid "Move each corner until the grid's edges are straight. Arrows move the marked corner, OK goes to the next one. Or drag a corner with the pointer."
+msgstr ""
