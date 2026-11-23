@@ -14,7 +14,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
-use crate::device::{Control, ControlKind};
+use crate::device::{Control, ControlKind, Link};
 
 mod netlink;
 
@@ -94,6 +94,69 @@ struct Interface {
     wifi: Option<Wifi>,
     rx_bytes: Option<u64>,
     tx_bytes: Option<u64>,
+}
+
+/// Fast, zero-subprocess summary of physical Wi-Fi and Ethernet interfaces
+/// for the Home screen's Network status icon (reads sysfs, `/proc/net/wireless`,
+/// and nl80211 only).
+pub(super) fn links() -> Vec<Link> {
+    links_from(Path::new(SYS_NET), "/proc/net/wireless", |index| {
+        netlink::station(index, None)
+            .ok()
+            .flatten()
+            .and_then(|station| station.signal_dbm)
+    })
+}
+
+fn links_from(
+    sys_net: &Path,
+    wireless_path: &str,
+    station_dbm: impl Fn(u32) -> Option<i32>,
+) -> Vec<Link> {
+    let interfaces = read_sysfs(sys_net);
+    if interfaces.is_empty() {
+        return Vec::new();
+    }
+    let has_connected_wifi = interfaces
+        .iter()
+        .any(|iface| iface.kind == Kind::Wifi && iface.up && iface.carrier == Some(true));
+    let signals = if has_connected_wifi {
+        std::fs::read_to_string(wireless_path)
+            .map(|text| parse_wireless(&text))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    interfaces
+        .iter()
+        .map(|iface| {
+            let connected = iface.up && iface.carrier == Some(true);
+            match iface.kind {
+                Kind::Wifi => Link::Wifi(connected.then(|| {
+                    let dbm = signals
+                        .iter()
+                        .find(|(name, _)| *name == iface.name)
+                        .map(|(_, level)| *level)
+                        .or_else(|| station_dbm(iface.index));
+                    dbm.map_or(4, dbm_to_bars)
+                })),
+                Kind::Ethernet | Kind::UsbEthernet => Link::Wired(connected),
+            }
+        })
+        .collect()
+}
+
+/// Converts Wi-Fi signal strength in dBm to 1..=4 bars.
+fn dbm_to_bars(dbm: i32) -> u8 {
+    if dbm >= -55 {
+        4
+    } else if dbm >= -67 {
+        3
+    } else if dbm >= -78 {
+        2
+    } else {
+        1
+    }
 }
 
 /// One Info row per fact of each interface, Wi-Fi first; then the

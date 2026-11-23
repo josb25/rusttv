@@ -199,7 +199,7 @@ pub struct SideRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeviceControls {
     tabs: Vec<FileTab>,
-    input: Option<FileInput>,
+    inputs: Vec<FileInput>,
     /// The UI's language (`LANG` style, e.g. `de_DE.UTF-8`).
     language: Option<String>,
 }
@@ -220,7 +220,7 @@ impl DeviceControls {
         paths.sort();
         let mut controls = Self {
             tabs: Vec::new(),
-            input: None,
+            inputs: Vec::new(),
             language,
         };
         for path in paths {
@@ -237,11 +237,11 @@ impl DeviceControls {
 
     fn add(&mut self, file: File) {
         for input in file.input {
-            if let Some(known) = &self.input {
-                log::warn!("input {} skipped; {} came first", input.id, known.id);
+            if self.inputs.iter().any(|known| known.id == input.id) {
+                log::warn!("input {} is described twice; the first counts", input.id);
                 continue;
             }
-            self.input = Some(input);
+            self.inputs.push(input);
         }
         for tab in file.tab {
             if self.tabs.iter().any(|known| known.id == tab.id) {
@@ -252,14 +252,22 @@ impl DeviceControls {
         }
     }
 
-    /// The device's video input, if a device file names one.
+    /// All video inputs described by device files, in file order.
+    pub fn inputs(&self) -> Vec<Input> {
+        self.inputs
+            .iter()
+            .map(|input| Input {
+                id: input.id.clone(),
+                label: self.pick(&input.label, &input.labels),
+                app: input.app.clone(),
+                watch: input.watch.clone(),
+            })
+            .collect()
+    }
+
+    /// The device's primary (first) video input, if a device file names one.
     pub fn input(&self) -> Option<Input> {
-        self.input.as_ref().map(|input| Input {
-            id: input.id.clone(),
-            label: self.pick(&input.label, &input.labels),
-            app: input.app.clone(),
-            watch: input.watch.clone(),
-        })
+        self.inputs().into_iter().next()
     }
 
     /// The Settings tabs, in the UI's language. `read` runs a corners
@@ -442,7 +450,7 @@ mod tests {
     fn controls(language: Option<&str>) -> DeviceControls {
         let mut controls = DeviceControls {
             tabs: Vec::new(),
-            input: None,
+            inputs: Vec::new(),
             language: language.map(str::to_owned),
         };
         controls.add(parse(FOCUS).unwrap());

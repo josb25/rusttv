@@ -77,31 +77,77 @@ enum Signal {
     Control { tab: String, id: String, step: i32 },
 }
 
+/// Exits any active `hy320f-hdmi show` viewer cleanly so pressing Home never
+/// leaves the projector stuck on the hardware HDMI layer or leaves a `SIGTERM`
+/// queued behind `SIGSTOP` (which would kill the viewer on the next HDMI open).
+fn close_hdmi_viewer() {
+    let Ok(text) = std::fs::read_to_string("/run/hy320f-hdmi/show") else {
+        return;
+    };
+    let Ok(pid) = text.trim().parse::<i32>() else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+        return;
+    };
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+    // Wake the viewer if the background freezer already stopped it, then wait
+    // briefly for it to exit before Home activates and re-freezes background apps.
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::CONT);
+    for _ in 0..30 {
+        if rustix::process::test_kill_process(pid).is_err() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 /// Hands `signal` to the home screen on the UI thread, where the lifecycle
-/// lives.
+/// lives. Startup `InputSignal` events retry briefly while the Slint event
+/// loop finishes initializing so automatic HDMI startup is never lost.
 fn deliver(signal: Signal) {
+    if matches!(signal, Signal::Home) {
+        close_hdmi_viewer();
+    }
+    let is_input_signal = matches!(signal, Signal::App(AppEvent::InputSignal));
     let what = format!("{signal:?}");
-    let delivered = slint::invoke_from_event_loop(move || {
-        LIFECYCLE.with(|slot| {
-            if let Some(lifecycle) = slot.borrow().as_ref() {
-                match signal {
-                    // The splash stays until the app's window takes the
-                    // focus (the launcher then pauses itself).
-                    Signal::App(AppEvent::Started(_)) => {}
-                    Signal::App(AppEvent::Exited(id)) => lifecycle.app_ended(id),
-                    Signal::App(AppEvent::InputSignal) => lifecycle.input_signal(),
-                    // Like Android's Home: leave every page, then come back.
-                    Signal::Home => lifecycle.home(),
-                    Signal::AppMenu => lifecycle.app_menu(),
-                    Signal::Volume(change) => lifecycle.volume(change),
-                    Signal::Power => lifecycle.power_menu(),
-                    Signal::Control { tab, id, step } => lifecycle.control(tab, id, step),
+    let try_send = |sig: Signal| {
+        slint::invoke_from_event_loop(move || {
+            LIFECYCLE.with(|slot| {
+                if let Some(lifecycle) = slot.borrow().as_ref() {
+                    match sig {
+                        // The splash stays until the app's window takes the
+                        // focus (the launcher then pauses itself).
+                        Signal::App(AppEvent::Started(_)) => {}
+                        Signal::App(AppEvent::Exited(id)) => lifecycle.app_ended(id),
+                        Signal::App(AppEvent::InputSignal) => lifecycle.input_signal(),
+                        // Like Android's Home: leave every page, then come back.
+                        Signal::Home => lifecycle.home(),
+                        Signal::AppMenu => lifecycle.app_menu(),
+                        Signal::Volume(change) => lifecycle.volume(change),
+                        Signal::Power => lifecycle.power_menu(),
+                        Signal::Control { tab, id, step } => lifecycle.control(tab, id, step),
+                    }
                 }
-            }
-        });
-    });
-    if let Err(error) = delivered {
-        log::warn!("{what} not delivered: {error}");
+            });
+        })
+    };
+    if let Err(error) = try_send(signal.clone()) {
+        if is_input_signal {
+            let _ = std::thread::Builder::new()
+                .name("rusttv-input-retry".into())
+                .spawn(move || {
+                    for _ in 0..20 {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        if try_send(signal.clone()).is_ok() {
+                            return;
+                        }
+                    }
+                    log::warn!("{what} not delivered after startup retries");
+                });
+        } else {
+            log::warn!("{what} not delivered: {error}");
+        }
     }
 }
 

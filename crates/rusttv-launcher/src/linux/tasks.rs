@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
@@ -53,6 +53,31 @@ const MEMORY_POLL: Duration = Duration::from_secs(2);
 /// again: the app needs time to exit and hand its memory back.
 const MEMORY_SETTLE: Duration = Duration::from_secs(6);
 
+/// Shared wakeup signal between [`Tasks`] and the `rusttv-memory` thread so
+/// the memory watcher parks with zero wakeups while fewer than two apps run.
+#[derive(Debug, Default)]
+struct MemoryWake {
+    /// `(running_app_count, stopped)`.
+    state: Mutex<(usize, bool)>,
+    cond: Condvar,
+}
+
+impl MemoryWake {
+    fn set_count(&self, count: usize) {
+        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.0 = count;
+        if count >= 2 {
+            self.cond.notify_one();
+        }
+    }
+
+    fn stop(&self) {
+        let mut guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.1 = true;
+        self.cond.notify_all();
+    }
+}
+
 /// The running apps, shared with the threads that wait for them.
 #[derive(Debug, Default)]
 pub struct Tasks {
@@ -60,6 +85,14 @@ pub struct Tasks {
     running: Mutex<Vec<Task>>,
     /// The app whose window was last in front (not the launcher's).
     front: Mutex<Option<String>>,
+    /// Wakes `rusttv-memory` only when two or more apps are running.
+    wake: Arc<MemoryWake>,
+}
+
+impl Drop for Tasks {
+    fn drop(&mut self) {
+        self.wake.stop();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,23 +115,49 @@ impl Tasks {
     /// Starts watching memory if `limits` asks for it.
     pub fn start(limits: Limits) -> Arc<Self> {
         let (min, max_swap) = (limits.min_available_mib, limits.max_swap_mib);
+        let wake = Arc::new(MemoryWake::default());
         let tasks = Arc::new(Self {
             limits,
             running: Mutex::default(),
             front: Mutex::default(),
+            wake: wake.clone(),
         });
         if min.is_some() || max_swap.is_some() {
             let weak = Arc::downgrade(&tasks);
             let spawned = std::thread::Builder::new()
                 .name("rusttv-memory".into())
                 .spawn(move || {
-                    while let Some(tasks) = weak.upgrade() {
+                    loop {
+                        // Park completely while fewer than 2 apps run (with
+                        // 0 or 1 app, `close_one_in_background` never closes
+                        // anything, so polling `/proc/meminfo` wastes CPU).
+                        {
+                            let mut guard =
+                                wake.state.lock().unwrap_or_else(PoisonError::into_inner);
+                            while guard.0 < 2 && !guard.1 {
+                                guard = wake
+                                    .cond
+                                    .wait(guard)
+                                    .unwrap_or_else(PoisonError::into_inner);
+                            }
+                            if guard.1 {
+                                break;
+                            }
+                        }
+                        let Some(tasks) = weak.upgrade() else {
+                            break;
+                        };
                         let reason =
                             read_meminfo().and_then(|memory| memory_short(memory, min, max_swap));
                         let closed =
                             reason.is_some_and(|reason| tasks.close_one_in_background(reason));
                         drop(tasks);
-                        std::thread::sleep(if closed { MEMORY_SETTLE } else { MEMORY_POLL });
+                        let wait_for = if closed { MEMORY_SETTLE } else { MEMORY_POLL };
+                        let guard = wake.state.lock().unwrap_or_else(PoisonError::into_inner);
+                        if guard.1 {
+                            break;
+                        }
+                        let _ = wake.cond.wait_timeout(guard, wait_for);
                     }
                 });
             if let Err(error) = spawned {
@@ -187,7 +246,10 @@ impl Tasks {
                 frozen: false,
                 muted: false,
             });
+            let count = running.len();
             let Some(max) = self.limits.max_apps else {
+                drop(running);
+                self.wake.set_count(count);
                 return;
             };
             let mut open: Vec<&mut Task> = running
@@ -196,13 +258,16 @@ impl Tasks {
                 .collect();
             open.sort_by_key(|task| task.used);
             let excess = (open.len() + 1).saturating_sub(max.max(1));
-            open.into_iter()
+            let victims: Vec<Task> = open
+                .into_iter()
                 .take(excess)
                 .map(|task| {
                     task.closing = true;
                     task.clone()
                 })
-                .collect()
+                .collect();
+            self.wake.set_count(count);
+            victims
         };
         for task in victims {
             log::info!(
@@ -219,7 +284,12 @@ impl Tasks {
         let Ok(group) = i32::try_from(group) else {
             return;
         };
-        self.lock().retain(|task| task.group != group);
+        let count = {
+            let mut running = self.lock();
+            running.retain(|task| task.group != group);
+            running.len()
+        };
+        self.wake.set_count(count);
     }
 
     /// A window with this app ID came to the front (the launcher's own too);

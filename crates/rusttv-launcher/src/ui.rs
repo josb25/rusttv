@@ -3,7 +3,7 @@
 //! Rust owns all state and timers; the window only draws and forwards keys.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -23,6 +23,8 @@ use crate::panels;
 use crate::platform::{
     AppEntry, Artwork, Bitmap, Platform, PlatformError, PointerState, UpdateStatus,
 };
+use crate::settings::ThemeOption;
+use crate::theme::{self, HeroMode, ThemeSpec};
 use rusttv_remote::Event as RemoteEvent;
 use rusttv_remote::protocol::{
     AppView as PhoneAppView, DragPhase, Gesture, Key as PhoneKey, KeyAction, MenuChoice,
@@ -49,7 +51,7 @@ use generated::{
     AboutAmbient, AboutBanner, AboutCorner, AboutListRow, AboutPanel, AmbientLine, Badges, Dir,
     Effects, Hints, HistoryAmbient, HistoryBanner, HistoryCorner, HistoryListRow, HistoryPanel,
     HomeWindow, Pictures, Pointer, RemoteAmbient, RemoteBanner, RemoteCorner, RemoteListRow,
-    RemotePanel, ReviewLine, SettingsRow, Strings, TileData,
+    RemotePanel, ReviewLine, SettingsRow, Strings, Theme, TileData,
 };
 
 mod corners_view;
@@ -106,6 +108,11 @@ const HISTORY_BANNER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/history.
 const BANNER_SHADOW_SIZE: (u32, u32) = (560, 192);
 const BANNER_SHADOW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/banner-shadow.rgba"));
 
+/// Compact white-alpha Gaussian shadow mask for focused tiles (home.slint
+/// `Tile`), tinted via `Image.colorize` for zero-FBO elevation & glow.
+const TILE_SHADOW_SIZE: (u32, u32) = (208, 138);
+const TILE_SHADOW: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tile-shadow.rgba"));
+
 /// A built-in tile's banner, by tile name, as RGBA ([`BUILTIN_BANNER_SIZE`]):
 /// for the phones' pictures.
 pub(crate) fn builtin_banner(name: &str) -> Option<(u32, u32, &'static [u8])> {
@@ -131,9 +138,6 @@ const BACKDROP_GLOW_TONE: f64 = 30.0;
 /// 320-wide 16:9 screen down to `Glow::HEIGHT` (780 of 1080 rows, 130 of
 /// 180); the GPU scales it to the screen.
 const BACKDROP_SIZE: (u32, u32) = (320, 130);
-
-/// `Theme.bg` in `home.slint`: the page under the grid.
-const PAGE_COLOUR: [u8; 3] = [0x0E, 0x10, 0x14];
 
 /// Lines of the notices passed to the window at a time: more than fit, the
 /// rest is clipped (long lines wrap). Only a slice is laid out, never all
@@ -275,6 +279,9 @@ impl Lifecycle {
             }
             if controller.home.launching() == Some(id.as_str()) {
                 controller.input(Input::Paused);
+            }
+            if controller.sync_running() {
+                controller.render();
             }
         });
     }
@@ -557,6 +564,109 @@ fn apply_effects(window: &HomeWindow, reduced: bool) {
     effects.set_backdrop(!reduced);
 }
 
+/// Tints the build-time white-alpha [`TILE_SHADOW`] mask to `rgb` with peak
+/// alpha `alpha` (0..=1), once on startup or theme switch, so Slint draws a
+/// plain GPU texture with zero per-frame `Image.colorize` FBO passes.
+fn tint_tile_shadow(rgb: [u8; 3], alpha: f32) -> slint::Image {
+    let scale = alpha.clamp(0.0, 1.0);
+    let mut rgba = Vec::with_capacity(TILE_SHADOW.len());
+    for &[_, _, _, alpha_byte] in TILE_SHADOW.as_chunks::<4>().0 {
+        let a = (f32::from(alpha_byte) * scale).round().clamp(0.0, 255.0) as u8;
+        rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], a]);
+    }
+    slint::Image::from_rgba8(SharedPixelBuffer::clone_from_slice(
+        &rgba,
+        TILE_SHADOW_SIZE.0,
+        TILE_SHADOW_SIZE.1,
+    ))
+}
+
+/// Pushes a validated [`ThemeSpec`] onto the window's `Theme` global.
+fn apply_theme(window: &HomeWindow, spec: &ThemeSpec) {
+    let theme = window.global::<Theme>();
+    theme.set_bg(spec.colors.bg.to_slint());
+    theme.set_surface(spec.colors.surface.to_slint());
+    theme.set_dock_bg(spec.colors.dock_bg.to_slint());
+    theme.set_text(spec.colors.text.to_slint());
+    theme.set_text_dim(spec.colors.text_dim.to_slint());
+    theme.set_accent(spec.colors.accent.to_slint());
+    theme.set_accent_text(spec.colors.accent_text.to_slint());
+    theme.set_focus_ring(spec.colors.focus_ring.to_slint());
+    theme.set_layout_style(spec.layout.style.as_i32());
+    theme.set_columns(i32::try_from(spec.layout.columns).unwrap_or(6));
+    theme.set_tile_aspect(spec.layout.tile_aspect.as_i32());
+    theme.set_tile_style(spec.layout.tile_style.as_i32());
+    theme.set_tile_border_width(spec.layout.tile_border_width);
+    theme.set_tile_border_color(spec.layout.tile_border_color.to_slint());
+    theme.set_tile_dim_unfocused(spec.layout.tile_dim_unfocused);
+    theme.set_tile_gap(spec.layout.tile_gap);
+    theme.set_grid_margin_x(spec.layout.grid_margin_x);
+    theme.set_hero_align(spec.layout.hero_align.as_i32());
+    theme.set_hero_artwork(spec.layout.hero_artwork);
+    theme.set_hero_title_size(spec.layout.hero_title_size);
+    theme.set_hero_title_weight(spec.typography.hero_title_weight);
+    theme.set_focus_style(spec.layout.focus_style.as_i32());
+    theme.set_dock_surface(spec.layout.dock_surface);
+    theme.set_top_bar_style(spec.layout.top_bar_style.as_i32());
+    theme.set_clock_position(spec.layout.clock_position.as_i32());
+    theme.set_clock_size(spec.typography.clock_size);
+    theme.set_clock_weight(spec.typography.clock_weight);
+    theme.set_panel_style(spec.surfaces.panel_style.as_i32());
+    theme.set_panel_opacity(spec.surfaces.panel_opacity);
+    theme.set_panel_border_width(spec.surfaces.panel_border_width);
+    theme.set_panel_border_color(spec.surfaces.panel_border_color.to_slint());
+    theme.set_scrim_opacity(spec.surfaces.scrim_opacity);
+    theme.set_selection_style(spec.surfaces.selection_style.as_i32());
+    theme.set_font_family(spec.typography.font_family.as_str().into());
+    theme.set_motion_scale(spec.typography.motion_scale);
+    theme.set_tile_radius(spec.layout.tile_radius);
+    theme.set_panel_radius(spec.layout.panel_radius);
+    theme.set_focus_scale(spec.layout.focus_scale);
+    theme.set_focus_ring_width(spec.layout.focus_ring_width);
+    theme.set_hero_mode(spec.layout.hero.as_i32());
+    theme.set_show_labels(spec.layout.show_labels.as_i32());
+    theme.set_sway(spec.layout.sway);
+    theme.set_glow_strength(spec.layout.glow_strength);
+    theme.set_bg_gradient_angle(spec.background.gradient_angle);
+    theme.set_bg_scrim(spec.background.scrim.as_i32());
+    theme.set_bg_scrim_strength(spec.background.scrim_strength);
+    match spec.background.gradient {
+        Some((top, bottom)) => {
+            theme.set_bg_top(top.to_slint());
+            theme.set_bg_bottom(bottom.to_slint());
+        }
+        None => {
+            theme.set_bg_top(spec.colors.bg.to_slint());
+            theme.set_bg_bottom(spec.colors.bg.to_slint());
+        }
+    }
+    // Bake bg + gradient + PNG/SVG wallpaper + directional scrim once into a
+    // single opaque RGB texture (one GPU blit instead of 4 full-screen passes).
+    let rtl = window.global::<Dir>().get_rtl();
+    match theme::bake_backdrop(spec, rtl) {
+        Some(baked) => {
+            theme.set_bg_image(slint::Image::from_rgb8(
+                SharedPixelBuffer::clone_from_slice(&baked.rgb, baked.width, baked.height),
+            ));
+            theme.set_has_bg_image(true);
+            theme.set_bg_image_opacity(1.0);
+            theme.set_has_gradient(false);
+        }
+        None => {
+            theme.set_bg_image(slint::Image::default());
+            theme.set_has_bg_image(false);
+            theme.set_bg_image_opacity(0.0);
+            theme.set_has_gradient(false);
+        }
+    }
+    // Pre-tint the coloured focus-glow shadow once on theme switch (zero
+    // per-frame `Image.colorize` FBOs in Slint).
+    let fr = spec.colors.focus_ring;
+    window
+        .global::<Effects>()
+        .set_tile_glow_shadow(tint_tile_shadow([fr.r, fr.g, fr.b], 0.62));
+}
+
 /// Shows or hides the mouse pointer over the whole window, at once (a
 /// TouchArea's `mouse-cursor` only changes with the next pointer event).
 fn show_pointer(window: &HomeWindow, shown: bool) {
@@ -656,6 +766,9 @@ fn start(
             BANNER_SHADOW_SIZE.1,
         ),
     ));
+    window
+        .global::<Effects>()
+        .set_tile_shadow(tint_tile_shadow([0, 0, 0], 0.56));
     let reduced = options
         .order_file
         .as_deref()
@@ -726,6 +839,12 @@ fn start(
     window.on_quick_dismissed(move || {
         if let Some(controller) = weak.upgrade() {
             controller.borrow_mut().quick_dismissed();
+        }
+    });
+    let weak = Rc::downgrade(&controller);
+    window.on_overlay_dismissed(move || {
+        if let Some(controller) = weak.upgrade() {
+            controller.borrow_mut().overlay_dismissed();
         }
     });
     let weak = Rc::downgrade(&controller);
@@ -1075,6 +1194,12 @@ struct Controller {
     /// Reads the platform's tabs again while a code is shown, so it goes
     /// once the phone has used it.
     code_timer: Timer,
+    /// Available UI themes (built-in presets + discovered user TOML themes).
+    themes: Vec<ThemeSpec>,
+    /// Currently active UI theme.
+    active_theme: ThemeSpec,
+    /// Whether Settings → Effects is in Reduced mode (skip hero glow work).
+    reduced_effects: bool,
 }
 
 impl Controller {
@@ -1143,11 +1268,23 @@ impl Controller {
             home.focus_on(id);
         }
         // Settings → Idle screen: on unless its flag file is there.
-        let ambient_off = options
+        let state_dir = options
             .order_file
             .as_deref()
-            .and_then(std::path::Path::parent)
-            .is_some_and(|dir| dir.join(order_file::AMBIENT_OFF).exists());
+            .and_then(std::path::Path::parent);
+        let ambient_off = state_dir.is_some_and(|dir| dir.join(order_file::AMBIENT_OFF).exists());
+        let reduced_effects =
+            state_dir.is_some_and(|dir| dir.join(order_file::REDUCED_EFFECTS).exists());
+        let themes = theme::load_all(&theme::theme_dirs(state_dir));
+        let selected_id = theme::load_selected(state_dir);
+        let active_theme = themes
+            .iter()
+            .find(|spec| spec.id == selected_id)
+            .cloned()
+            .unwrap_or_default();
+        let (cols, slots, carousel) = active_theme.layout.home_nav();
+        home.set_layout(cols, slots, carousel);
+        apply_theme(window, &active_theme);
         let faces = faces_view::Faces::new(window, ambient_off);
         let right_to_left = options.right_to_left;
         let baked = platform.top_right_menu();
@@ -1244,6 +1381,9 @@ impl Controller {
                 corners_status: String::new(),
                 settings_code: String::new(),
                 code_timer: Timer::default(),
+                themes,
+                active_theme,
+                reduced_effects,
             })
         });
         *controller.borrow().options.lifecycle.0.borrow_mut() = Rc::downgrade(&controller);
@@ -1279,6 +1419,8 @@ impl Controller {
         self.show_history_panel();
         self.push_remote_view();
         self.pack_timer.stop();
+        self.start_links();
+        let running_changed = self.sync_running();
         // The clock runs again, and Home may dim after a rest from now (no
         // sway until a key, as after a long time away before).
         self.leave_ambient();
@@ -1301,6 +1443,8 @@ impl Controller {
             // Rebuild tiles and hero too: an updated app may have a new banner.
             self.shown.clear();
             self.hero = None;
+            self.render();
+        } else if running_changed {
             self.render();
         }
     }
@@ -1326,6 +1470,13 @@ impl Controller {
                 if self.home.set_apps(&apps) {
                     self.save_order();
                 }
+                let deletable: BTreeSet<String> = apps
+                    .iter()
+                    .filter(|app| self.platform.can_delete_app(&app.id))
+                    .map(|app| app.id.clone())
+                    .collect();
+                self.home.set_deletable_apps(deletable);
+                self.sync_running();
                 // Queued again, in tile order, when the tiles are rebuilt (`render`).
                 self.pending_artwork.clear();
             }
@@ -1488,6 +1639,9 @@ impl Controller {
     }
 
     fn input(&mut self, input: Input) {
+        if !matches!(input, Input::Tick | Input::Paused | Input::LaunchFailed) {
+            self.platform.note_activity();
+        }
         // The pairing and trust screens take the remote's keys wherever they
         // were opened (trust can open over Home).
         if self.pairing.is_some()
@@ -1528,9 +1682,10 @@ impl Controller {
         }
         if input == Input::Paused {
             self.faces_away();
-            // No sway and no idle screen while away; resuming starts the
-            // wait again.
+            // No sway, no idle screen and no network-icon polling while away;
+            // resuming starts them again.
             self.idle_timer.stop();
+            self.links_timer.stop();
             self.set_idle_phase(0);
             self.prompt = None;
             self.corners = None;
@@ -1601,6 +1756,11 @@ impl Controller {
                     self.resized = Some(id);
                 }
             }
+            Some(Effect::CloseApp(id)) => {
+                self.platform.close_app(&id);
+                self.sync_running();
+            }
+            Some(Effect::DeleteApp(id)) => self.delete_app(id),
             // `render` fills the page and queues its artwork.
             Some(Effect::OpenHidden) | None => {}
         }
@@ -1643,6 +1803,7 @@ impl Controller {
                 if !self.home.hover(&tile) {
                     return;
                 }
+                self.home.touch_move((self.clock)());
                 None
             }
             _ => {
@@ -1745,7 +1906,6 @@ impl Controller {
                 Input::Left
             };
             self.input(step);
-            self.render();
             let Some(after) = focus(self) else {
                 return;
             };
@@ -1754,6 +1914,203 @@ impl Controller {
             }
             if sideways && after.abs_diff(target) > now.abs_diff(target) {
                 flipped = !flipped;
+            }
+        }
+    }
+
+    /// A click outside an open folder or long-press tile menu closes it.
+    fn overlay_dismissed(&mut self) {
+        self.parked = false;
+        if !self.pointer_reaches(false) {
+            return;
+        }
+        if matches!(self.home.state(), State::Menu | State::Folder) {
+            self.input(Input::Back);
+        }
+    }
+
+    /// Re-scans built-in and user theme directories so newly dropped TOML
+    /// themes appear in Settings → Theme without restarting.
+    pub(super) fn reload_themes(&mut self) {
+        let state_dir = self
+            .options
+            .order_file
+            .as_deref()
+            .and_then(std::path::Path::parent);
+        self.themes = theme::load_all(&theme::theme_dirs(state_dir));
+        if let Some(updated) = self
+            .themes
+            .iter()
+            .find(|spec| spec.id == self.active_theme.id)
+            .cloned()
+        {
+            self.active_theme = updated;
+        }
+    }
+
+    /// Theme entries shown in Settings → Theme.
+    pub(super) fn theme_options(&self) -> Vec<ThemeOption> {
+        self.themes
+            .iter()
+            .map(|spec| ThemeOption {
+                id: spec.id.clone(),
+                name: spec.name.clone(),
+                detail: spec.detail.clone(),
+            })
+            .collect()
+    }
+
+    /// Applies and persists the selected theme immediately.
+    pub(super) fn select_theme(&mut self, id: &str) {
+        let Some(spec) = self.themes.iter().find(|spec| spec.id == id).cloned() else {
+            return;
+        };
+        let bg_changed = spec.colors.bg != self.active_theme.colors.bg;
+        let tint_changed = spec.colors.icon_card_tint != self.active_theme.colors.icon_card_tint
+            || spec.colors.surface != self.active_theme.colors.surface;
+        self.active_theme = spec;
+        let (cols, slots, carousel) = self.active_theme.layout.home_nav();
+        self.home.set_layout(cols, slots, carousel);
+        if let Some(dir) = self
+            .options
+            .order_file
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            && let Err(error) = theme::save_selected(dir, &self.active_theme.id)
+        {
+            log::warn!("saving selected theme failed: {error}");
+        }
+        if let Some(window) = self.window.upgrade() {
+            apply_theme(&window, &self.active_theme);
+        }
+        if bg_changed {
+            self.glows.clear();
+            self.builtins.clear_glows();
+            self.glow_generation += 1;
+            self.glows_complete = false;
+        }
+        if tint_changed {
+            self.shown.clear();
+            self.folder_shown.clear();
+            self.hidden_shown.clear();
+        }
+        self.hero = None;
+        self.show_hero();
+    }
+
+    /// Called when Settings → Effects changes `reduced_effects`.
+    pub(super) fn on_effects_changed(&mut self, reduced: bool) {
+        if self.reduced_effects == reduced {
+            return;
+        }
+        self.reduced_effects = reduced;
+        if !reduced && self.glows_enabled() {
+            self.glows_complete = false;
+            self.hero = None;
+            self.show_hero();
+        }
+    }
+
+    /// Whether hero colour glows should be quantized and baked.
+    fn glows_enabled(&self) -> bool {
+        !self.reduced_effects
+            && self.active_theme.layout.hero != HeroMode::Off
+            && self.active_theme.layout.glow_strength > 0.0
+    }
+
+    /// The active theme's background colour for baked hero backdrops.
+    fn page_colour(&self) -> [u8; 3] {
+        self.active_theme.colors.bg.rgb_array()
+    }
+
+    /// Refreshes which installed apps are currently running in the background
+    /// and updates the `running` badge in-place on visible tile rows.
+    fn sync_running(&mut self) -> bool {
+        let running: BTreeSet<String> = self
+            .apps
+            .keys()
+            .filter(|id| self.platform.is_running(id))
+            .cloned()
+            .collect();
+        if !self.home.sync_running_apps(running) {
+            return false;
+        }
+        for (index, tile) in self.shown.iter().enumerate() {
+            if let TileId::App(id) = tile
+                && let Some(mut data) = self.tiles.row_data(index)
+            {
+                let now = self.home.is_app_running(id);
+                if data.running != now {
+                    data.running = now;
+                    self.tiles.set_row_data(index, data);
+                }
+            }
+        }
+        for (index, tile) in self.folder_shown.iter().enumerate() {
+            if let TileId::App(id) = tile
+                && let Some(mut data) = self.folder_tiles.row_data(index)
+            {
+                let now = self.home.is_app_running(id);
+                if data.running != now {
+                    data.running = now;
+                    self.folder_tiles.set_row_data(index, data);
+                }
+            }
+        }
+        true
+    }
+
+    /// Deletes / uninstalls an app off the UI thread so package managers
+    /// (e.g. Flatpak) never block Home rendering.
+    fn delete_app(&mut self, id: String) {
+        let label = self
+            .apps
+            .get(&id)
+            .map_or_else(|| id.clone(), |app| app.label.clone());
+        match self.platform.delete_app(&id) {
+            Ok(work) => {
+                let done_label = label.clone();
+                let started = settings_view::in_background(
+                    "rusttv-delete-app",
+                    work,
+                    move |controller, result| controller.app_deleted(&done_label, result),
+                );
+                if let Err(error) = started {
+                    self.app_deleted(
+                        &label,
+                        Err(PlatformError::call("delete_app", error.to_string())),
+                    );
+                }
+            }
+            Err(error) => self.app_deleted(&label, Err(error)),
+        }
+    }
+
+    /// Finishes an app deletion on the UI thread: reloads Home on success or
+    /// shows why deletion failed.
+    fn app_deleted(&mut self, label: &str, result: Result<(), PlatformError>) {
+        match result {
+            Ok(()) => {
+                self.reload_apps();
+                self.shown.clear();
+                self.folder_shown.clear();
+                self.hidden_shown.clear();
+                self.hero = None;
+                let text = self
+                    .window
+                    .upgrade()
+                    .map(|window| window.global::<Strings>().invoke_deleted_app(label.into()));
+                self.show_toast(text.unwrap_or_default());
+                self.render();
+            }
+            Err(error) => {
+                log::warn!("deleting {label} failed: {error}");
+                let text = self.window.upgrade().map(|window| {
+                    window
+                        .global::<Strings>()
+                        .invoke_couldnt_delete(label.into(), error.to_string().into())
+                });
+                self.show_toast(text.unwrap_or_default());
             }
         }
     }
@@ -2042,6 +2399,9 @@ impl Controller {
         } = closed;
         if close_app {
             self.platform.close_app(&app);
+            if self.sync_running() {
+                self.render();
+            }
             return;
         }
         let Some(size) = size.filter(|size| *size != self.platform.app_scale(&app)) else {
@@ -2079,6 +2439,7 @@ impl Controller {
         }
         match self.platform.launch(id) {
             Ok(()) => {
+                self.sync_running();
                 if let Some(delay) = self.options.simulated_pause {
                     let me = self.me.clone();
                     self.pause_timer
@@ -2246,9 +2607,10 @@ impl Controller {
             Some(TileId::App(id)) => self.platform.app_scale(&id),
             _ => 100,
         };
+        let confirm_delete = self.home.menu_confirm_delete();
         let labels: Vec<SharedString> = items
             .iter()
-            .map(|item| menu_label(&window, *item, size))
+            .map(|item| menu_label(&window, *item, size, confirm_delete))
             .collect();
         if !self.menu_items.iter().eq(labels.iter().cloned()) {
             self.menu_items.set_vec(labels);
@@ -2721,12 +3083,20 @@ impl Controller {
             .as_ref()
             .map(|id| self.tile_data(id))
             .unwrap_or_default();
-        let glow = match &focused {
-            Some(TileId::App(component)) => self.glow(component),
-            Some(builtin) => self.builtins.view(builtin).map(BuiltinView::glow),
-            None => None,
-        }
-        .unwrap_or_default();
+        let glow = if self.glows_enabled() {
+            let page_colour = self.page_colour();
+            match &focused {
+                Some(TileId::App(component)) => self.glow(component),
+                Some(builtin) => self
+                    .builtins
+                    .view(builtin)
+                    .map(|view| view.glow(page_colour)),
+                None => None,
+            }
+            .unwrap_or_default()
+        } else {
+            generated::Glow::default()
+        };
         // Fill the hidden layer, then make it the front one.
         if self.hero_a_front {
             window.set_hero_b(data);
@@ -2747,8 +3117,11 @@ impl Controller {
         }
     }
 
-    /// The hero glow for an app; `None` if it has no artwork.
+    /// The hero glow for an app; `None` if it has no artwork or glows are off.
     fn glow(&mut self, component: &str) -> Option<generated::Glow> {
+        if !self.glows_enabled() {
+            return None;
+        }
         if let Some(cached) = self.glows.get(component) {
             return Some(cached.clone());
         }
@@ -2757,6 +3130,7 @@ impl Controller {
             source,
             self.platform.top_right_menu(),
             self.options.right_to_left,
+            self.page_colour(),
         );
         self.glows.insert(component.to_owned(), glow.clone());
         Some(glow)
@@ -2771,7 +3145,7 @@ impl Controller {
     /// its glow is ready make theirs on focus ([`Controller::glow`],
     /// [`BuiltinView::glow`]).
     fn make_glows(&mut self) {
-        if self.glows_making || self.glows_complete || self.glows_failed {
+        if !self.glows_enabled() || self.glows_making || self.glows_complete || self.glows_failed {
             return;
         }
         let missing = |id: &TileId| match id {
@@ -2799,7 +3173,11 @@ impl Controller {
             self.glows_complete = true;
             return;
         }
-        let (baked, right_to_left) = (self.platform.top_right_menu(), self.options.right_to_left);
+        let (baked, right_to_left, page_colour) = (
+            self.platform.top_right_menu(),
+            self.options.right_to_left,
+            self.page_colour(),
+        );
         let generation = self.glow_generation;
         let started = settings_view::in_background(
             "rusttv-glows",
@@ -2807,7 +3185,9 @@ impl Controller {
                 // A panic is reported as `None`, so the UI stops waiting.
                 std::panic::catch_unwind(move || {
                     jobs.into_iter()
-                        .map(|(id, source)| (id, glow_parts(&source, baked, right_to_left)))
+                        .map(|(id, source)| {
+                            (id, glow_parts(&source, baked, right_to_left, page_colour))
+                        })
                         .collect::<Vec<_>>()
                 })
                 .ok()
@@ -3025,11 +3405,27 @@ impl Controller {
                 ..TileData::default()
             };
         };
+        let tint = if app.kind == 1 && self.active_theme.colors.icon_card_tint > 0.0 {
+            app.accent_rgb
+                .map(|rgb| {
+                    theme::mix_rgb(
+                        self.active_theme.colors.surface,
+                        rgb,
+                        self.active_theme.colors.icon_card_tint,
+                    )
+                    .to_slint()
+                })
+                .unwrap_or_default()
+        } else {
+            slint::Color::default()
+        };
         TileData {
             label: app.label.as_str().into(),
             // A cheap handle: the tile and the hero share one image and texture.
             image: app.image.clone(),
             kind: app.kind,
+            running: self.home.is_app_running(component),
+            tint,
             ..TileData::default()
         }
     }
@@ -3047,6 +3443,8 @@ struct AppView {
     /// (3, 5 and 6 are the About, Hidden apps and Settings tiles).
     kind: i32,
     glow_source: Option<Bitmap>,
+    /// Mean colour of non-transparent icon pixels, for tinted icon cards.
+    accent_rgb: Option<[u8; 3]>,
 }
 
 impl AppView {
@@ -3056,6 +3454,7 @@ impl AppView {
             image: slint::Image::default(),
             kind: 2,
             glow_source: None,
+            accent_rgb: None,
         };
         view.set_artwork(&entry.artwork);
         view
@@ -3073,6 +3472,11 @@ impl AppView {
         self.kind = kind;
         self.glow_source =
             glow_source.map(|bitmap| bitmap.shrink(GLOW_SOURCE_SIZE.0, GLOW_SOURCE_SIZE.1));
+        self.accent_rgb = if kind == 1 {
+            self.glow_source.as_ref().and_then(icon_tint_rgb)
+        } else {
+            None
+        };
     }
 
     /// Whether the artwork is still to be loaded ([`Artwork::Later`]).
@@ -3114,13 +3518,13 @@ impl BuiltinView {
     }
 
     /// The hero glow, made on the first call if the worker has not made it.
-    fn glow(&self) -> generated::Glow {
+    fn glow(&self, page_colour: [u8; 3]) -> generated::Glow {
         self.glow
             .get_or_init(|| {
                 self.glow_source
                     .as_ref()
                     .map_or_else(generated::Glow::default, |source| {
-                        hero_glow(source, self.baked, self.right_to_left)
+                        hero_glow(source, self.baked, self.right_to_left, page_colour)
                     })
             })
             .clone()
@@ -3155,6 +3559,16 @@ impl Builtins {
             history: BuiltinView::new(HISTORY_BANNER, baked, right_to_left),
             hidden: BuiltinView::new(HIDDEN_BANNER, baked, right_to_left),
         }
+    }
+
+    /// Clears cached built-in glows (e.g. when the active theme's background
+    /// colour changes).
+    fn clear_glows(&mut self) {
+        self.about.glow.take();
+        self.settings.glow.take();
+        self.remote.glow.take();
+        self.history.glow.take();
+        self.hidden.glow.take();
     }
 
     /// The view of a built-in tile; `None` for an app.
@@ -3260,12 +3674,19 @@ fn mode_value(state: State) -> i32 {
 
 /// What the long-press menu shows for an item; `size` is the app's size
 /// in percent.
-fn menu_label(window: &HomeWindow, item: MenuItem, size: u32) -> SharedString {
+fn menu_label(
+    window: &HomeWindow,
+    item: MenuItem,
+    size: u32,
+    confirm_delete: bool,
+) -> SharedString {
     let strings = window.global::<Strings>();
     match item {
         MenuItem::Move => strings.invoke_menu_label(0),
         MenuItem::Hide => strings.invoke_menu_label(1),
         MenuItem::Size => strings.invoke_menu_size(size.to_string().into()),
+        MenuItem::Close => strings.invoke_menu_label(2),
+        MenuItem::Delete => strings.invoke_menu_label(if confirm_delete { 4 } else { 3 }),
     }
 }
 
@@ -3326,8 +3747,13 @@ fn input_for_key(text: &str, pressed: bool) -> Option<Input> {
 /// With `baked` (`Effects.baked-backdrop`, where there is a top-right menu)
 /// the backdrop is painted once into a small picture; otherwise home.slint
 /// draws it from the other fields.
-fn hero_glow(source: &Bitmap, baked: bool, right_to_left: bool) -> generated::Glow {
-    glow_from_parts(glow_parts(source, baked, right_to_left))
+fn hero_glow(
+    source: &Bitmap,
+    baked: bool,
+    right_to_left: bool,
+    page_colour: [u8; 3],
+) -> generated::Glow {
+    glow_from_parts(glow_parts(source, baked, right_to_left, page_colour))
 }
 
 /// What [`hero_glow`] computes, without Slint's types (which stay on the
@@ -3340,13 +3766,56 @@ struct GlowParts {
 
 /// The costly part of [`hero_glow`] (the colour quantization and the baked
 /// backdrop's pixels); any thread.
-fn glow_parts(source: &Bitmap, baked: bool, right_to_left: bool) -> GlowParts {
+fn glow_parts(
+    source: &Bitmap,
+    baked: bool,
+    right_to_left: bool,
+    page_colour: [u8; 3],
+) -> GlowParts {
     let glow = source.glow(BACKDROP_BASE_TONE, BACKDROP_GLOW_TONE);
     let backdrop = baked.then(|| {
         let (width, height) = BACKDROP_SIZE;
-        glow.paint(width, height, PAGE_COLOUR, right_to_left)
+        glow.paint(width, height, page_colour, right_to_left)
     });
     GlowParts { glow, backdrop }
+}
+
+/// Fast mean RGB of opaque, colourful pixels in an icon's small copy, used to
+/// subtly tint icon-only cards when a theme enables `icon_card_tint`.
+fn icon_tint_rgb(bitmap: &Bitmap) -> Option<[u8; 3]> {
+    let mut sat_sum = [0_u64; 3];
+    let mut sat_count = 0_u64;
+    let mut all_sum = [0_u64; 3];
+    let mut all_count = 0_u64;
+    for &[r, g, b, a] in bitmap.rgba().as_chunks::<4>().0 {
+        if a < 128 {
+            continue;
+        }
+        all_sum[0] += u64::from(r);
+        all_sum[1] += u64::from(g);
+        all_sum[2] += u64::from(b);
+        all_count += 1;
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        if max.saturating_sub(min) >= 32 {
+            sat_sum[0] += u64::from(r);
+            sat_sum[1] += u64::from(g);
+            sat_sum[2] += u64::from(b);
+            sat_count += 1;
+        }
+    }
+    let (sum, count) = if sat_count > 0 {
+        (sat_sum, sat_count)
+    } else if all_count > 0 {
+        (all_sum, all_count)
+    } else {
+        return None;
+    };
+    Some([
+        (sum[0] / count) as u8,
+        (sum[1] / count) as u8,
+        (sum[2] / count) as u8,
+    ])
 }
 
 /// The window's glow from [`glow_parts`]; cheap (one small copy).
@@ -3537,6 +4006,17 @@ mod tests {
 
         fn close_app(&mut self, id: &str) {
             self.platform.borrow_mut().close_app(id);
+        }
+
+        fn can_delete_app(&self, id: &str) -> bool {
+            self.platform.borrow().can_delete_app(id)
+        }
+
+        fn delete_app(
+            &mut self,
+            id: &str,
+        ) -> Result<Box<dyn FnOnce() -> Result<(), PlatformError> + Send>, PlatformError> {
+            self.platform.borrow_mut().delete_app(id)
         }
 
         fn last_app(&self) -> Option<String> {
@@ -4030,8 +4510,14 @@ mod tests {
     fn open_remote(screen: &Screen) {
         click_settings(&screen.window);
         settle(screen);
-        // Effects, Idle screen, Updates, History, RustTV Remote.
-        for _ in 0..4 {
+        // Effects, Theme, Idle screen, Updates, History, RustTV Remote.
+        let remote = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section.title == "RustTV Remote")
+            .expect("RustTV Remote section");
+        for _ in 0..remote {
             screen.tap(DOWN);
         }
         screen.tap(RIGHT);
@@ -4440,12 +4926,14 @@ mod tests {
     fn builtin_glow_is_made_when_first_needed() {
         let view = BuiltinView::new(HISTORY_BANNER, false, false);
         assert!(view.glow.get().is_none());
+        let bg = ThemeSpec::default().colors.bg.rgb_array();
         let expected = hero_glow(
             view.glow_source.as_ref().expect("the banner has its size"),
             false,
             false,
+            bg,
         );
-        let glow = view.glow();
+        let glow = view.glow(bg);
         assert!(view.glow.get().is_some());
         assert_eq!(glow.color, expected.color);
         assert_eq!(glow.base, expected.base);
@@ -4507,6 +4995,7 @@ mod tests {
             &Bitmap::new(1, 1, vec![200, 40, 40, 255]).expect("one pixel"),
             false,
             false,
+            ThemeSpec::default().colors.bg.rgb_array(),
         );
         let old = controller.glow_generation - 1;
         controller.glows_made(old, vec![(TileId::App("a/.Main".to_owned()), parts)]);
@@ -5804,9 +6293,9 @@ mod tests {
         click_settings(&screen.window);
         assert_eq!(screen.window.get_mode(), mode_value(State::Settings));
         settle(&screen);
-        // Effects, Idle screen, Updates, History, RustTV Remote, About: no
-        // Animations (a system setting, Android's Settings has it).
-        assert_eq!(screen.window.get_settings_sections().row_count(), 6);
+        // Effects, Theme, Idle screen, Updates, History, RustTV Remote, About:
+        // no Animations (a system setting, Android's Settings has it).
+        assert_eq!(screen.window.get_settings_sections().row_count(), 7);
         assert_eq!(screen.window.get_settings_rows().row_count(), 2);
         // Other tests share the history: start from whatever it holds.
         let before = crate::history::History::get()
@@ -6687,4 +7176,156 @@ mod tests {
 
     /// How long the volume bar stays (ui/device_view.rs), with a margin.
     const VOLUME_SHOWN_MS: u64 = 1600;
+
+    #[test]
+    fn user_themes_appear_in_settings_and_apply_live_by_dpad_and_pointer() {
+        let dir = std::env::temp_dir().join(format!("rusttv-theme-ui-{}", std::process::id()));
+        let themes_dir = dir.join("themes");
+        std::fs::create_dir_all(&themes_dir).expect("themes dir");
+        std::fs::write(
+            themes_dir.join("sunset.toml"),
+            "schema_version = 1\nname = \"Sunset\"\nauthor = \"Tester\"\n\
+             [colors]\nbg = \"#120810\"\naccent = \"#FF6633\"\n\
+             [layout]\nhero = \"compact\"\ntile_radius = 20\n",
+        )
+        .expect("write theme");
+        let order_path = dir.join("order.toml");
+        let screen = screen(Some(order_path));
+        click_settings(&screen.window);
+        settle(&screen);
+
+        let theme_idx = screen
+            .window
+            .get_settings_sections()
+            .iter()
+            .position(|section| section.title == "Theme")
+            .expect("Theme section");
+        // Navigate with D-pad into Theme section.
+        for _ in 0..theme_idx {
+            screen.tap(DOWN);
+        }
+        let rows: Vec<SettingsRow> = screen.window.get_settings_rows().iter().collect();
+        let sunset_row = rows
+            .iter()
+            .position(|row| row.title == "Sunset")
+            .expect("custom Sunset theme listed");
+        assert!(rows[0].current, "Default theme active initially");
+
+        // Select Sunset via D-pad.
+        screen.tap(RIGHT);
+        for _ in 0..sunset_row {
+            screen.tap(DOWN);
+        }
+        screen.tap(OK);
+        let theme = screen.window.global::<Theme>();
+        assert_eq!(theme.get_hero_mode(), 1, "compact hero applied live");
+        assert!((theme.get_tile_radius() - 20.0).abs() < 0.01);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("theme"))
+                .expect("saved")
+                .trim(),
+            "user:sunset"
+        );
+
+        // Switch back to OLED Pure (row 1) via pointer click.
+        screen.window.invoke_settings_pointer(true, 1, 1);
+        let theme = screen.window.global::<Theme>();
+        assert_eq!(theme.get_hero_mode(), 0, "OLED Pure uses full hero");
+        assert_eq!(theme.get_bg(), slint::Color::from_rgb_u8(0, 0, 0));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("theme"))
+                .expect("saved")
+                .trim(),
+            "oled"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn running_app_shows_indicator_and_close_app_in_long_press_menu() {
+        let screen = screen_with(abc().with_app_sizes(), None);
+        // Launch first app so FakePlatform marks it running.
+        screen.tap(OK);
+        screen.lifecycle.paused();
+        screen.wait(10);
+        screen.lifecycle.resumed();
+        screen.wait(10);
+        assert!(
+            screen
+                .window
+                .get_tiles()
+                .row_data(0)
+                .expect("tile 0")
+                .running,
+            "running pill shown on tile"
+        );
+
+        // Open long-press menu via right-click (pointer).
+        screen.window.invoke_tile_pointer(false, 0, 2);
+        assert_eq!(screen.window.get_mode(), mode_value(State::Menu));
+        let items: Vec<SharedString> = screen.window.get_menu_items().iter().collect();
+        let close_idx = items
+            .iter()
+            .position(|label| label == "Close app")
+            .expect("Close app entry");
+        // Click "Close app" with pointer.
+        screen
+            .window
+            .invoke_list_pointer(0, i32::try_from(close_idx).unwrap(), 1);
+        assert_eq!(screen.window.get_mode(), mode_value(State::Browse));
+        assert!(
+            !screen
+                .window
+                .get_tiles()
+                .row_data(0)
+                .expect("tile 0")
+                .running,
+            "running pill clears once app is closed"
+        );
+    }
+
+    #[test]
+    fn long_press_menu_deletes_app_after_confirmation_and_click_outside_dismisses() {
+        let screen = screen_with(abc().with_deletable_apps(true), None);
+        let before = screen.window.get_tiles().row_count();
+        // Open menu on tile 0 via right-click, then dismiss by clicking outside.
+        screen.window.invoke_tile_pointer(false, 0, 2);
+        assert_eq!(screen.window.get_mode(), mode_value(State::Menu));
+        screen.window.invoke_overlay_dismissed();
+        assert_eq!(screen.window.get_mode(), mode_value(State::Browse));
+
+        // Open menu again via D-pad long press and select Delete app twice.
+        screen.long_press_ok();
+        let items: Vec<SharedString> = screen.window.get_menu_items().iter().collect();
+        let delete_idx = items
+            .iter()
+            .position(|label| label == "Delete app")
+            .expect("Delete app entry");
+        for _ in 0..delete_idx {
+            screen.tap(DOWN);
+        }
+        // First OK arms confirmation; app is not deleted yet.
+        screen.tap(OK);
+        assert_eq!(screen.window.get_mode(), mode_value(State::Menu));
+        assert_eq!(
+            screen.window.get_menu_items().row_data(delete_idx).unwrap(),
+            "Press OK again to delete"
+        );
+        // Second OK deletes the app on a worker thread and refreshes Home.
+        screen.tap(OK);
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(5));
+            screen.wait(16);
+            if screen.window.get_tiles().row_count() < before {
+                break;
+            }
+        }
+        assert_eq!(screen.window.get_tiles().row_count(), before - 1);
+        assert!(
+            screen.window.get_toast().starts_with("Deleted "),
+            "toast: {}",
+            screen.window.get_toast()
+        );
+    }
 }

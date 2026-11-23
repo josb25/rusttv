@@ -14,7 +14,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod casting;
 mod net;
+mod power_input;
 mod tailscale;
 
 use super::device_file::{self, DeviceControls, Input, SideRow};
@@ -134,25 +136,37 @@ pub struct LinuxDevice {
     open: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// The name typed into Add network, waiting for its password.
     hidden: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// AirPlay (`uxplay`), Smart View / Miracast, and DLNA receivers.
+    casting: std::sync::Arc<casting::Casting>,
+    /// HDMI auto-start / auto-switch and sleep / idle auto-shutdown timers.
+    power_input: std::sync::Arc<power_input::PowerInput>,
 }
 
 impl LinuxDevice {
     /// Looks for the tools in `PATH`.
     pub fn detect() -> Self {
+        let systemctl = program_exists("systemctl");
+        let controls = std::sync::Arc::new(DeviceControls::load(
+            Path::new(device_file::DIR),
+            super::ui_language(),
+        ));
+        let power_input = std::sync::Arc::new(power_input::PowerInput::detect(
+            controls.inputs(),
+            systemctl,
+        ));
         Self {
             wpctl: program_exists("wpctl"),
             nmcli: program_exists("nmcli"),
             bluetoothctl: program_exists("bluetoothctl"),
-            systemctl: program_exists("systemctl"),
+            systemctl,
             tailscale: program_exists("tailscale"),
             other_os: read_root_only(OTHER_OS).and_then(|text| parse_other_os(&text)),
             scanned: std::sync::Arc::default(),
-            controls: std::sync::Arc::new(DeviceControls::load(
-                Path::new(device_file::DIR),
-                super::ui_language(),
-            )),
+            controls,
             open: std::sync::Arc::default(),
             hidden: std::sync::Arc::default(),
+            casting: std::sync::Arc::new(casting::Casting::detect()),
+            power_input,
         }
     }
 
@@ -194,9 +208,37 @@ impl LinuxDevice {
         self.controls.pattern(tab, control)
     }
 
-    /// The device's video input, from its device files.
+    /// The device's active/preferred video input, from its device files.
     pub(super) fn input(&self) -> Option<Input> {
-        self.controls.input()
+        self.power_input
+            .preferred_input()
+            .cloned()
+            .or_else(|| self.controls.input())
+    }
+
+    /// Startup HDMI input behavior (`Some((input_id, require_signal))`).
+    pub(super) fn startup_input_target(&self) -> Option<(String, bool)> {
+        self.power_input.startup_input_target()
+    }
+
+    /// Whether HDMI auto-switch on newly detected signal is enabled.
+    pub(super) fn auto_switch_hdmi(&self) -> bool {
+        self.power_input.auto_switch_hdmi()
+    }
+
+    /// Updates live HDMI signal state (for Settings display and idle keep-awake).
+    pub(super) fn set_hdmi_status(&self, has_signal: bool, raw_status: &str) {
+        self.power_input.set_hdmi_status(has_signal, raw_status);
+    }
+
+    /// Remembers the last HDMI input selected by the user.
+    pub(super) fn record_input_selected(&self, input_id: &str) {
+        self.power_input.record_input_selected(input_id);
+    }
+
+    /// Resets the idle auto-shutdown countdown on user interaction.
+    pub(super) fn note_activity(&self) {
+        self.power_input.note_activity();
     }
 
     /// The device-file controls of the side menu over apps.
@@ -384,6 +426,15 @@ impl LinuxDevice {
             if let Some(other) = &self.other_os {
                 controls.push(control("other-os", &other.label, "", ControlKind::Action));
             }
+            controls.push(control(
+                "sleep-timer",
+                "Sleep timer",
+                &self.power_input.sleep_timer_detail(),
+                ControlKind::Choice {
+                    options: power_input::sleep_timer_options(),
+                    selected: self.power_input.sleep_timer_choice(),
+                },
+            ));
             controls.push(control("poweroff", "Power off", "", ControlKind::Action));
             tab(QuickPanel::Power, "Power", controls)
         })
@@ -391,25 +442,51 @@ impl LinuxDevice {
 }
 
 impl DeviceSettings for LinuxDevice {
-    /// Sound and Network, as in their quick panels, Devices and Tailscale.
+    /// Sound and Network, as in their quick panels, Devices, Power & Input,
+    /// Screen Mirroring and Tailscale. Each subsystem is queried concurrently
+    /// so Settings opens at the speed of the slowest tool rather than the sum.
     fn tabs(&self) -> Vec<Tab> {
+        let (audio, network, devices, controls, power_input_tab, casting_tab, tailscale) =
+            std::thread::scope(|scope| {
+                let audio = scope.spawn(|| {
+                    self.audio().map(|mut tab| {
+                        "Sound".clone_into(&mut tab.title);
+                        tab
+                    })
+                });
+                // Settings' Network tab also has each interface's details (not
+                // the quick panel); it is there without nmcli too.
+                let network = scope.spawn(|| self.network(Some(&net::details())));
+                let devices = scope.spawn(|| self.devices());
+                let controls = scope.spawn(|| {
+                    self.controls.tabs(|command| {
+                        let (program, args) = command.split_first()?;
+                        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                        run(program, &args).ok()
+                    })
+                });
+                let power_input_tab = scope.spawn(|| self.power_input.tab());
+                let casting_tab = scope.spawn(|| self.casting.tab());
+                let tailscale = self.tailscale.then(|| scope.spawn(tailscale::tab));
+                (
+                    audio.join().ok().flatten(),
+                    network.join().ok().flatten(),
+                    devices.join().ok().flatten(),
+                    controls.join().ok().unwrap_or_default(),
+                    power_input_tab.join().ok().flatten(),
+                    casting_tab.join().ok(),
+                    tailscale.and_then(|handle| handle.join().ok().flatten()),
+                )
+            });
         let mut tabs = Vec::new();
-        if let Some(mut audio) = self.audio() {
-            "Sound".clone_into(&mut audio.title);
-            tabs.push(audio);
-        }
-        // Settings' Network tab also has each interface's details (not
-        // the quick panel); it is there without nmcli too.
-        tabs.extend(self.network(Some(&net::details())));
-        tabs.extend(self.devices());
-        tabs.extend(self.controls.tabs(|command| {
-            let (program, args) = command.split_first()?;
-            let args: Vec<&str> = args.iter().map(String::as_str).collect();
-            run(program, &args).ok()
-        }));
-        if self.tailscale {
-            tabs.extend(tailscale::tab());
-        }
+        tabs.extend(audio);
+        tabs.extend(network);
+        tabs.extend(devices);
+        tabs.extend(controls);
+        tabs.push(power_input::display_tab());
+        tabs.extend(power_input_tab);
+        tabs.extend(casting_tab);
+        tabs.extend(tailscale);
         tabs
     }
 
@@ -422,10 +499,20 @@ impl DeviceSettings for LinuxDevice {
     }
 
     fn set(&self, tab: &str, control: &str, value: Value) -> Result<(), String> {
+        self.power_input.note_activity();
         if let Some(command) = self.controls.command(tab, control, &value) {
             let (program, args) = command.split_first().ok_or("no command")?;
             let args: Vec<&str> = args.iter().map(String::as_str).collect();
             return run(program, &args).map(drop);
+        }
+        if tab == power_input::DISPLAY_TAB {
+            return power_input::set_display(control, &value);
+        }
+        if tab == power_input::TAB || control == "sleep-timer" {
+            return self.power_input.set(control, &value);
+        }
+        if tab == casting::TAB {
+            return self.casting.set(control, &value);
         }
         if tab == tailscale::TAB
             && let Some(result) = tailscale::set(control, &value)
@@ -554,8 +641,8 @@ impl DeviceSettings for LinuxDevice {
                 run("bluetoothctl", &["connect", address])
             }
             (control, Value::Action) if control.starts_with(BT_DISCONNECT) => {
-                let address = bt_address(&control[BT_DISCONNECT.len()..])
-                    .ok_or("not a Bluetooth address")?;
+                let address =
+                    bt_address(&control[BT_DISCONNECT.len()..]).ok_or("not a Bluetooth address")?;
                 run("bluetoothctl", &["disconnect", address])
             }
             (control, Value::Action) if control.starts_with(BT_FORGET) => {
@@ -643,9 +730,14 @@ impl DeviceSettings for LinuxDevice {
             .and_then(|text| parse_volume(&text))
     }
 
-    /// NetworkManager's Wi-Fi and Ethernet interfaces; the signal from its
-    /// last scan (no new scan).
+    /// Wi-Fi and Ethernet interfaces for the top-right Network icon. Prefers
+    /// direct sysfs + `/proc/net/wireless` + nl80211 (no subprocesses),
+    /// falling back to `nmcli` only when sysfs lists no interfaces.
     fn links(&self) -> Vec<Link> {
+        let fast = net::links();
+        if !fast.is_empty() {
+            return fast;
+        }
         if !self.nmcli {
             return Vec::new();
         }
@@ -754,30 +846,48 @@ fn run_with_input(program: &str, args: &[&str], input: Option<&str>) -> Result<S
         // Dropped after writing: the tool sees the end of its input.
         let _ = writeln!(stdin, "{input}");
     }
-    let deadline = Instant::now() + TOOL_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("{program} took too long"));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (status, output, error) = std::thread::scope(|scope| {
+        let out_handle = scope.spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = stdout {
+                let _ = pipe.read_to_string(&mut text);
             }
-            Err(error) => return Err(format!("{program}: {error}")),
-        }
-    };
-    let mut output = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_string(&mut output);
-    }
+            text
+        });
+        let err_handle = scope.spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = stderr {
+                let _ = pipe.read_to_string(&mut text);
+            }
+            text
+        });
+        let deadline = Instant::now() + TOOL_TIMEOUT;
+        let mut sleep_ms = 2_u64;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                    sleep_ms = (sleep_ms * 2).min(20);
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(format!("{program} took too long"));
+                }
+                Err(error) => break Err(format!("{program}: {error}")),
+            }
+        };
+        let output = out_handle.join().unwrap_or_default();
+        let error = err_handle.join().unwrap_or_default();
+        (status, output, error)
+    });
+    let status = status?;
     if status.success() {
         Ok(output)
     } else {
-        let mut error = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let _ = stderr.read_to_string(&mut error);
-        }
         let error = error.trim();
         Err(if error.is_empty() {
             format!("{program} failed ({status})")
@@ -1760,7 +1870,10 @@ mod tests {
             "bt-disconnect:--help",
             "bt-forget:AA:BB:CC:DD:EE:FF;",
         ] {
-            assert!(device.set("bluetooth", action, Value::Action).is_err(), "{action}");
+            assert!(
+                device.set("bluetooth", action, Value::Action).is_err(),
+                "{action}"
+            );
         }
     }
 
@@ -1842,7 +1955,7 @@ mod tests {
         };
         let power = device.panel(QuickPanel::Power).expect("a Power panel");
         let ids: Vec<&str> = power.controls.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["reboot", "other-os", "poweroff"]);
+        assert_eq!(ids, ["reboot", "other-os", "sleep-timer", "poweroff"]);
     }
 
     #[test]

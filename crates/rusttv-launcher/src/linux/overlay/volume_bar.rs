@@ -55,7 +55,7 @@ const SHADOW_ALPHA: f32 = 0.5;
 const SHADOW_BLUR: usize = 10;
 
 /// What the bar shows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Shows {
     volume: Volume,
     /// "Muted", in the current language.
@@ -124,6 +124,8 @@ fn run(font: FontVec, volumes: &Receiver<Shows>, wake: &OwnedFd) -> Result<(), S
             muted: String::new(),
         },
         fade: Fade::still(0.0),
+        cached_base: None,
+        frame_buf: Vec::new(),
     };
     let mut hide_at: Option<Instant> = None;
     loop {
@@ -225,6 +227,11 @@ struct State {
     shown: Option<Shown>,
     shows: Shows,
     fade: Fade,
+    /// Full-opacity BGRA pixels cached for `shows` so fade frames avoid
+    /// re-rasterizing the shadow, speaker icon, and font glyphs.
+    cached_base: Option<(Shows, Vec<u8>)>,
+    /// Reused scratch buffer for opacity-scaled frames.
+    frame_buf: Vec<u8>,
 }
 
 impl State {
@@ -270,11 +277,30 @@ impl State {
         let Some(shown) = self.shown.as_ref().filter(|shown| shown.configured) else {
             return;
         };
-        let opacity = self.fade.at(Instant::now());
-        let Some(pixels) = draw(&self.shows, &self.font, opacity) else {
+        let opacity = self.fade.at(Instant::now()).clamp(0.0, 1.0);
+        let cache_hit = self
+            .cached_base
+            .as_ref()
+            .is_some_and(|(cached, _)| *cached == self.shows);
+        if !cache_hit {
+            let Some(base) = draw_base(&self.shows, &self.font) else {
+                return;
+            };
+            self.cached_base = Some((self.shows.clone(), base));
+        }
+        let Some((_, base)) = self.cached_base.as_ref() else {
             return;
         };
-        match super::shm_buffer(&self.shm, &pixels, WIDTH, HEIGHT, qh) {
+        let pixels: &[u8] = if (opacity - 1.0).abs() < f32::EPSILON {
+            base
+        } else {
+            self.frame_buf.resize(base.len(), 0);
+            for (dst, &src) in self.frame_buf.iter_mut().zip(base.iter()) {
+                *dst = (f32::from(src) * opacity).round() as u8;
+            }
+            &self.frame_buf
+        };
+        match super::shm_buffer(&self.shm, pixels, WIDTH, HEIGHT, qh) {
             Ok(buffer) => {
                 shown.surface.attach(Some(&buffer), 0, 0);
                 shown.surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
@@ -285,10 +311,11 @@ impl State {
     }
 }
 
-/// The bar as `VolumeOsd` draws it: a pill with a soft shadow, a speaker
-/// outline (crossed out when muted), the level as an accent line on a faint
-/// track, and the level in percent (or "Muted"), all at `opacity`.
-fn draw(shows: &Shows, font: &FontVec, opacity: f32) -> Option<Vec<u8>> {
+/// The bar as `VolumeOsd` draws it at full opacity (premultiplied BGRA8888):
+/// a pill with a soft shadow, a speaker outline (crossed out when muted),
+/// the level as an accent line on a faint track, and the level in percent
+/// (or "Muted").
+fn draw_base(shows: &Shows, font: &FontVec) -> Option<Vec<u8>> {
     let mut pixmap = Pixmap::new(WIDTH, HEIGHT)?;
     shadow(&mut pixmap);
     let (x0, y0) = (PAD, PAD);
@@ -325,13 +352,18 @@ fn draw(shows: &Shows, font: &FontVec, opacity: f32) -> Option<Vec<u8>> {
         false,
     );
     let mut bytes = pixmap.take();
-    let opacity = opacity.clamp(0.0, 1.0);
     for pixel in bytes.as_chunks_mut::<4>().0 {
-        // Premultiplied: all four scale with the opacity.
-        for channel in pixel.iter_mut() {
-            *channel = (f32::from(*channel) * opacity).round() as u8;
-        }
         pixel.swap(0, 2);
+    }
+    Some(bytes)
+}
+
+#[cfg(test)]
+fn draw(shows: &Shows, font: &FontVec, opacity: f32) -> Option<Vec<u8>> {
+    let mut bytes = draw_base(shows, font)?;
+    let opacity = opacity.clamp(0.0, 1.0);
+    for channel in &mut bytes {
+        *channel = (f32::from(*channel) * opacity).round() as u8;
     }
     Some(bytes)
 }

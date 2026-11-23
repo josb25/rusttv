@@ -43,22 +43,36 @@ export component ControlRow inherits Rectangle {
     in property <bool> heading;
     property <bool> one-line: detail == "" && !slider && !tall;
     height: (one-line ? 64 : 96) * u;
-    border-radius: 10 * u;
-    background: selected ? Theme.text : Theme.text.with-alpha(0);
-    animate background { duration: 120ms; }
+    border-radius: min(Theme.tile-radius, 12.0) * u;
+    background: !selected ? Theme.text.with-alpha(0)
+        : Theme.selection-style == 1 ? Theme.accent
+        : Theme.selection-style == 2 ? Theme.text.with-alpha(0.12)
+        : Theme.text;
+    animate background { duration: 120ms * Theme.motion-scale; }
 
     pure function place-x(x: length, width: length) -> length {
         return rtl ? self.width - x - width : x;
     }
     property <TextHorizontalAlignment> start: rtl ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
+    property <color> sel-fg: Theme.selection-style == 1 ? Theme.accent-text
+        : Theme.selection-style == 2 ? Theme.text
+        : Theme.bg;
 
+    if selected && Theme.selection-style == 2: Rectangle {
+        x: root.place-x(6 * u, 6 * u);
+        y: 12 * u;
+        width: 6 * u;
+        height: parent.height - 24 * u;
+        border-radius: 3 * u;
+        background: Theme.accent;
+    }
     if current: Rectangle {
         x: root.place-x(18 * u, 10 * u);
         y: (root.one-line ? (parent.height - self.height) / 2 : 28 * u);
         width: 10 * u;
         height: 10 * u;
         border-radius: self.width / 2;
-        background: Theme.accent;
+        background: selected && Theme.selection-style == 1 ? Theme.accent-text : Theme.accent;
     }
     Text {
         x: root.place-x(44 * u, self.width);
@@ -67,12 +81,12 @@ export component ControlRow inherits Rectangle {
         height: root.one-line ? parent.height : 34 * u;
         text: root.text;
         font-size: (heading ? 22 : 27) * u;
-        font-weight: heading ? 700 : 500;
-        color: selected ? Theme.bg : heading ? Theme.accent : dim ? Theme.text-dim : Theme.text;
+        font-weight: heading ? 700 : selected ? 600 : 500;
+        color: selected ? root.sel-fg : heading ? Theme.accent : dim ? Theme.text-dim : Theme.text;
         horizontal-alignment: root.start;
         vertical-alignment: heading ? TextVerticalAlignment.bottom : TextVerticalAlignment.center;
         overflow: elide;
-        animate color { duration: 120ms; }
+        animate color { duration: 120ms * Theme.motion-scale; }
     }
     if detail != "" || slider: Text {
         x: root.place-x(44 * u, self.width);
@@ -81,11 +95,11 @@ export component ControlRow inherits Rectangle {
         height: 32 * u;
         text: root.detail;
         font-size: 25 * u;
-        color: selected ? Theme.bg.with-alpha(0.7) : Theme.text-dim;
+        color: selected ? root.sel-fg.with-alpha(0.75) : Theme.text-dim;
         horizontal-alignment: root.start;
         vertical-alignment: center;
         overflow: elide;
-        animate color { duration: 120ms; }
+        animate color { duration: 120ms * Theme.motion-scale; }
     }
     if slider: Rectangle {
         x: root.place-x(170 * u, self.width);
@@ -93,13 +107,13 @@ export component ControlRow inherits Rectangle {
         width: parent.width - 214 * u;
         height: 8 * u;
         border-radius: self.height / 2;
-        background: selected ? Theme.bg.with-alpha(0.2) : #FFFFFF26;
+        background: selected ? root.sel-fg.with-alpha(0.22) : #FFFFFF26;
         Rectangle {
             x: rtl ? parent.width - self.width : 0;
             width: parent.width * clamp(level, 0, 1);
             height: parent.height;
             border-radius: parent.border-radius;
-            background: selected ? Theme.bg : Theme.accent;
+            background: selected ? (Theme.selection-style == 2 ? Theme.accent : root.sel-fg) : Theme.accent;
         }
     }
 }
@@ -124,6 +138,9 @@ export component QuickBar inherits Rectangle {
     in property <[int]> links;
     // The name of the device's video input (code 7), e.g. "HDMI".
     in property <string> input-label;
+    // Softens unfocused buttons when `top_bar_style = "minimal"` without
+    // setting container `opacity < 1.0` (which allocates a Skia FBO layer).
+    in property <bool> dimmed: false;
     // A click on entry `index`.
     callback clicked(int);
     // The pointer moved onto entry `index`.
@@ -185,13 +202,13 @@ export component QuickBar inherits Rectangle {
 
     for code[i] in actions: button := Rectangle {
         property <bool> focused: i == selected;
-        property <color> ink: focused ? Theme.bg : Theme.text;
+        property <color> ink: focused ? Theme.bg : (root.dimmed ? Theme.text.with-alpha(0.58) : Theme.text);
         width: root.span(code);
         x: rtl ? root.width - root.start(i, code) - self.width : root.start(i, code);
         height: size;
         border-radius: self.height / 2;
-        background: focused ? Theme.text : #0000005C;
-        animate background { duration: 120ms; }
+        background: focused ? Theme.text : (root.dimmed ? #00000038 : #0000005C);
+        animate background { duration: 120ms * Theme.motion-scale; }
         if code != 3 || links.length == 0: Path {
             x: (parent.width - parent.height * 0.5) / 2;
             y: parent.height * 0.25;
@@ -286,8 +303,10 @@ export component QuickPanel inherits Rectangle {
 
     width: 720 * u;
     height: self.list-y + self.shown * self.pitch + 16 * u;
-    border-radius: 16 * u;
-    background: Theme.surface;
+    border-radius: Theme.panel-radius * u;
+    background: Theme.surface.with-alpha(Theme.panel-opacity);
+    border-width: Theme.panel-border-width * u;
+    border-color: Theme.panel-border-color;
     drop-shadow-color: #00000080;
     drop-shadow-blur: 40 * u;
     drop-shadow-offset-y: 16 * u;
@@ -371,7 +390,7 @@ export component PowerMenu inherits Rectangle {
     property <length> button-width: 640 * u;
     property <length> list-height: rows.length * pitch;
 
-    background: #000000D8;
+    background: Theme.bg.with-alpha(max(Theme.scrim-opacity, 0.80));
 
     TouchArea {
         clicked => { root.dismissed(); }
@@ -403,13 +422,39 @@ export component PowerMenu inherits Rectangle {
         width: button-width;
         height: pitch - 28 * u;
         border-radius: self.height / 2;
-        background: focused ? Theme.text : Theme.surface;
-        animate background { duration: 120ms; }
+        background: !focused ? Theme.surface.with-alpha(Theme.panel-opacity)
+            : Theme.selection-style == 1 ? Theme.accent
+            : Theme.selection-style == 2 ? Theme.surface
+            : Theme.text;
+        border-width: focused && Theme.selection-style == 2 ? 3 * u : Theme.panel-border-width * u;
+        border-color: focused && Theme.selection-style == 2 ? Theme.accent : Theme.panel-border-color;
+        animate background { duration: 120ms * Theme.motion-scale; }
+        property <color> fg: !focused ? Theme.text
+            : Theme.selection-style == 1 ? Theme.accent-text
+            : Theme.selection-style == 2 ? Theme.text
+            : Theme.bg;
         Text {
+            y: data.detail == "" ? 0 : 12 * u;
+            width: parent.width;
+            height: data.detail == "" ? parent.height : 46 * u;
+            horizontal-alignment: center;
+            vertical-alignment: center;
             text: data.title;
-            font-size: 38 * u;
+            font-size: (data.detail == "" ? 38 : 32) * u;
             font-weight: 500;
-            color: parent.focused ? Theme.bg : Theme.text;
+            color: parent.fg;
+        }
+        if data.detail != "": Text {
+            y: 56 * u;
+            width: parent.width - 48 * u;
+            x: 24 * u;
+            height: 32 * u;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            text: data.detail;
+            font-size: 22 * u;
+            color: parent.focused ? parent.fg.with-alpha(0.75) : Theme.text-dim;
+            overflow: elide;
         }
         TouchArea {
             mouse-cursor: pointer;

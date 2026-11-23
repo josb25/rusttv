@@ -223,6 +223,10 @@ pub trait Platform {
         None
     }
 
+    /// Notes a user interaction (remote, keyboard, mouse, gamepad, phone) so
+    /// platform idle timers (such as auto power-off) reset.
+    fn note_activity(&self) {}
+
     /// Whether this platform can scale an app's UI ([`Platform::app_scale`]);
     /// then app menus have a Size entry. Asked once at start.
     fn scales_apps(&self) -> bool {
@@ -245,6 +249,25 @@ pub trait Platform {
     /// Closes app `id`. Where apps are processes (Linux), its end arrives
     /// as for any app ([`crate::Lifecycle::app_ended`]).
     fn close_app(&mut self, _id: &str) {}
+
+    /// Whether app `id` can be deleted / uninstalled directly from its
+    /// long-press menu.
+    fn can_delete_app(&self, _id: &str) -> bool {
+        false
+    }
+
+    /// Prepares deletion of app `id` and returns a worker closure that
+    /// performs the uninstall off the UI thread so slow package managers
+    /// (e.g. Flatpak) never block rendering.
+    fn delete_app(
+        &mut self,
+        _id: &str,
+    ) -> Result<Box<dyn FnOnce() -> Result<(), PlatformError> + Send>, PlatformError> {
+        Err(PlatformError::call(
+            "delete_app",
+            "deleting apps is not supported on this platform",
+        ))
+    }
 
     /// The app that was last in front of the launcher, for the app
     /// overlay that holding Home opens; `None` if none runs.
@@ -760,6 +783,10 @@ pub struct FakePlatform {
     apps: Vec<AppEntry>,
     launched: Vec<String>,
     failing: BTreeSet<String>,
+    /// Whether apps can be deleted from the long-press menu in tests.
+    deletable: bool,
+    /// Apps deleted via [`Platform::delete_app`], in order.
+    deleted: Vec<String>,
     apps_changed: bool,
     /// List artwork as [`Artwork::Later`], like the Android bridge.
     lazy: bool,
@@ -987,6 +1014,18 @@ impl FakePlatform {
     pub fn left(&self) -> &[String] {
         &self.left
     }
+
+    /// Enables app deletion from the long-press menu (for tests).
+    #[must_use]
+    pub fn with_deletable_apps(mut self, allow: bool) -> Self {
+        self.deletable = allow;
+        self
+    }
+
+    /// The apps deleted via [`Platform::delete_app`], in order.
+    pub fn deleted(&self) -> &[String] {
+        &self.deleted
+    }
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -1139,6 +1178,33 @@ impl Platform for FakePlatform {
     fn close_app(&mut self, id: &str) {
         self.running.remove(id);
         self.closed.push(id.to_owned());
+    }
+
+    fn can_delete_app(&self, id: &str) -> bool {
+        self.deletable && self.apps.iter().any(|entry| entry.app.id == id)
+    }
+
+    fn delete_app(
+        &mut self,
+        id: &str,
+    ) -> Result<Box<dyn FnOnce() -> Result<(), PlatformError> + Send>, PlatformError> {
+        if !self.deletable {
+            return Err(PlatformError::call("delete_app", "not enabled"));
+        }
+        if self.failing.contains(id) {
+            return Err(PlatformError::call(
+                "delete_app",
+                format!("{id} delete failed (fake)"),
+            ));
+        }
+        let before = self.apps.len();
+        self.apps.retain(|entry| entry.app.id != id);
+        if self.apps.len() == before {
+            return Err(PlatformError::not_launchable(id));
+        }
+        self.running.remove(id);
+        self.deleted.push(id.to_owned());
+        Ok(Box::new(|| Ok(())))
     }
 
     fn open_overlay(&mut self, overlay: AppOverlay) -> bool {

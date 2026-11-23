@@ -66,17 +66,39 @@ const ICON_SIZES: [&str; 7] = [
     "128x128", "256x256", "96x96", "192x192", "512x512", "64x64", "48x48",
 ];
 
-/// Where SVG app icons are, under a data dir: the hicolor fallback theme,
-/// then the themes KDE and GNOME apps ship their icons in.
-const SVG_ICON_DIRS: [&str; 4] = [
+/// Where SVG app icons are, under a data dir: hicolor, KDE Breeze / Breeze
+/// Dark (apps, places, devices, categories), GNOME Adwaita, and Papirus.
+const SVG_ICON_DIRS: [&str; 22] = [
     "icons/hicolor/scalable/apps",
+    "icons/hicolor/scalable/places",
+    "icons/hicolor/scalable/devices",
+    "icons/hicolor/scalable/categories",
+    "icons/breeze/apps/64",
     "icons/breeze/apps/48",
+    "icons/breeze/apps/32",
+    "icons/breeze/places/64",
+    "icons/breeze/places/48",
+    "icons/breeze/devices/64",
+    "icons/breeze/devices/48",
+    "icons/breeze/categories/48",
+    "icons/breeze-dark/apps/64",
     "icons/breeze-dark/apps/48",
+    "icons/breeze-dark/apps/32",
+    "icons/breeze-dark/places/64",
+    "icons/breeze-dark/places/48",
+    "icons/breeze-dark/devices/48",
     "icons/Adwaita/scalable/apps",
+    "icons/Adwaita/scalable/places",
+    "icons/Adwaita/scalable/devices",
+    "icons/Papirus/64x64/apps",
 ];
 
-/// The longer side, in pixels, SVG icons are drawn at.
-const SVG_PIXELS: f32 = 256.0;
+/// Icon theme subdirectories checked for PNG icons under hicolor.
+const PNG_ICON_SUBDIRS: [&str; 4] = ["apps", "places", "devices", "categories"];
+
+/// The longer side, in pixels, SVG icons are drawn at (icon cards are 72 rpx,
+/// so 128 px stays sharp at 1080p/4K while cutting rasterization work 4×).
+const SVG_PIXELS: f32 = 128.0;
 
 /// KDE Connect's desktop entry, opened by its entry in the top-right menu.
 const KDE_CONNECT: &str = "org.kde.kdeconnect.app.desktop";
@@ -86,9 +108,30 @@ const KDE_CONNECT: &str = "org.kde.kdeconnect.app.desktop";
 const WATCH_RESTART: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Runs the video input's `watch` command on a thread of its own, again
-/// whenever it ends, and sends [`AppEvent::InputSignal`] when its lines
-/// say a picture started arriving.
-fn watch_input(command: Vec<String>, events: AppEvents) {
+/// whenever it ends, keeps [`LinuxDevice`] updated on live HDMI signal state,
+/// and sends [`AppEvent::InputSignal`] on configured startup HDMI or newly
+/// arriving HDMI signals.
+fn watch_input(command: Vec<String>, device: Arc<LinuxDevice>, events: AppEvents) {
+    let startup = device.startup_input_target();
+    let startup_always = matches!(startup, Some((_, false)));
+    let startup_on_signal = matches!(startup, Some((_, true)));
+
+    if startup_always {
+        let events_boot = events.clone();
+        let _ = std::thread::Builder::new()
+            .name("rusttv-input-boot".into())
+            .spawn(move || {
+                // Let the Slint window and compositor settle briefly, then open HDMI.
+                std::thread::sleep(std::time::Duration::from_millis(350));
+                log::info!("startup input configured: opening HDMI automatically");
+                events_boot(AppEvent::InputSignal);
+            });
+    }
+
+    if command.is_empty() {
+        return;
+    }
+
     let started = std::thread::Builder::new()
         .name("rusttv-input-watch".into())
         .spawn(move || {
@@ -96,9 +139,8 @@ fn watch_input(command: Vec<String>, events: AppEvents) {
             let Some((program, args)) = command.split_first() else {
                 return;
             };
-            // Whether a picture arrived when last heard; a picture that is
-            // already there at start doesn't switch.
             let mut signal: Option<bool> = None;
+            let mut seen_non_absent = false;
             loop {
                 let child = std::process::Command::new(program)
                     .args(args)
@@ -111,7 +153,19 @@ fn watch_input(command: Vec<String>, events: AppEvents) {
                             for line in std::io::BufReader::new(out).lines() {
                                 let Ok(line) = line else { break };
                                 log::info!("video input: {line}");
-                                let (now, switch) = input_change(signal, &line);
+                                let has_sig = device_file::has_signal(&line);
+                                device.set_hdmi_status(has_sig, &line);
+                                let auto = device.auto_switch_hdmi();
+                                let (now, switch) = input_change_with_policy(
+                                    signal,
+                                    &line,
+                                    seen_non_absent,
+                                    startup_on_signal && !startup_always,
+                                    auto,
+                                );
+                                if !device_file::is_absent(&line) {
+                                    seen_non_absent = true;
+                                }
                                 signal = now;
                                 if switch {
                                     events(AppEvent::InputSignal);
@@ -133,12 +187,40 @@ fn watch_input(command: Vec<String>, events: AppEvents) {
     }
 }
 
+/// Evaluates an HDMI watcher status line with startup & auto-switch policy:
+/// - On the very first non-`absent` line, switches only when `startup_on_signal`
+///   is true (the user opted into "HDMI when signal detected" on boot).
+/// - Afterward, when `auto_switch` is true, switches reliably both on
+///   `no-signal`/`unsupported` → `signal` AND when the HDMI service finishes
+///   starting (`absent` → `signal`).
+fn input_change_with_policy(
+    before: Option<bool>,
+    line: &str,
+    seen_non_absent: bool,
+    startup_on_signal: bool,
+    auto_switch: bool,
+) -> (Option<bool>, bool) {
+    if device_file::is_absent(line) {
+        return (None, false);
+    }
+    let now = device_file::has_signal(line);
+    let switch = if !seen_non_absent {
+        now && startup_on_signal
+    } else if !auto_switch {
+        false
+    } else {
+        now && before != Some(true)
+    };
+    (Some(now), switch)
+}
+
 /// A line of the video input's watcher after `before` (whether a picture
 /// arrived when last heard, `None` at start or while the input was
 /// unknown): whether one arrives now (`None`: unknown, "absent"), and
 /// whether to switch to it (only when it newly arrives after a line that
 /// said none did; a picture already there when the input becomes known
 /// doesn't switch, e.g. while the device starts).
+#[cfg_attr(not(test), allow(dead_code, reason = "kept for policy baseline tests"))]
 fn input_change(before: Option<bool>, line: &str) -> (Option<bool>, bool) {
     if device_file::is_absent(line) {
         return (None, false);
@@ -174,6 +256,11 @@ pub struct LinuxPlatform {
     utc_offset: RefCell<Option<(SystemTime, i32)>>,
     /// The test pattern, once a control that shows it moved.
     pattern: Option<overlay::PatternOverlay>,
+    /// Whether `flatpak` is available on PATH (for uninstalling Flatpak apps).
+    has_flatpak: bool,
+    /// Whether non-interactive `apt-get remove` is available (root or
+    /// passwordless sudo + dpkg) for uninstalling system `.desktop` packages.
+    apt_remove: bool,
 }
 
 /// How long a read UTC offset is used ([`LinuxPlatform::utc_offset_secs`]).
@@ -228,7 +315,10 @@ impl LinuxPlatform {
         let desktops = var("XDG_CURRENT_DESKTOP")
             .map(|value| value.split(':').map(str::to_owned).collect())
             .unwrap_or_default();
-        Self::new(dirs, desktops, ui_language())
+        let mut platform = Self::new(dirs, desktops, ui_language());
+        platform.has_flatpak = has_program("flatpak");
+        platform.apt_remove = detect_apt_remove();
+        platform
     }
 
     /// A platform over these data directories (most important first), desktop
@@ -249,6 +339,8 @@ impl LinuxPlatform {
             volume_bar: None,
             utc_offset: RefCell::default(),
             pattern: None,
+            has_flatpak: false,
+            apt_remove: false,
         }
     }
 
@@ -294,10 +386,8 @@ impl LinuxPlatform {
     /// the home screen.
     #[must_use]
     pub fn with_events(mut self, events: AppEvents) -> Self {
-        if let Some(input) = self.device.input()
-            && !input.watch.is_empty()
-        {
-            watch_input(input.watch, events.clone());
+        if let Some(input) = self.device.input() {
+            watch_input(input.watch, Arc::clone(&self.device), events.clone());
         }
         self.events = Some(events);
         self
@@ -416,27 +506,72 @@ impl LinuxPlatform {
     }
 
     /// A PNG of the icon in the hicolor theme or `pixmaps`, else an SVG
-    /// there or in the Breeze or Adwaita theme.
+    /// there or in the Breeze, Adwaita or Papirus themes. Follows the
+    /// freedesktop icon-naming fallback chain (`a-b-c` → `a-b` → `a`) when
+    /// the exact name is not found.
     fn find_icon(&self, icon: &str) -> Option<PathBuf> {
         if icon.contains('/') {
             let path = PathBuf::from(icon);
             return path.is_file().then_some(path);
         }
+        let mut candidate = icon;
+        loop {
+            if let Some(found) = self.find_icon_exact(candidate) {
+                return Some(found);
+            }
+            match candidate.rsplit_once('-') {
+                Some((parent, _)) if !parent.is_empty() => candidate = parent,
+                _ => return None,
+            }
+        }
+    }
+
+    fn find_icon_exact(&self, icon: &str) -> Option<PathBuf> {
         let png = format!("{icon}.png");
         let svg = format!("{icon}.svg");
-        let pngs = self.data_dirs.iter().flat_map(|dir| {
-            ICON_SIZES
-                .iter()
-                .map(|size| dir.join("icons/hicolor").join(size).join("apps").join(&png))
-                .chain(std::iter::once(dir.join("pixmaps").join(&png)))
-        });
-        let svgs = self.data_dirs.iter().flat_map(|dir| {
-            SVG_ICON_DIRS
-                .iter()
-                .map(|place| dir.join(place).join(&svg))
-                .chain(std::iter::once(dir.join("pixmaps").join(&svg)))
-        });
-        pngs.chain(svgs).find(|path| path.is_file())
+        for dir in &self.data_dirs {
+            for size in ICON_SIZES {
+                for sub in PNG_ICON_SUBDIRS {
+                    let path = dir.join("icons/hicolor").join(size).join(sub).join(&png);
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+            }
+            let pixmap = dir.join("pixmaps").join(&png);
+            if pixmap.is_file() {
+                return Some(pixmap);
+            }
+        }
+        for dir in &self.data_dirs {
+            for place in SVG_ICON_DIRS {
+                let path = dir.join(place).join(&svg);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+            let pixmap = dir.join("pixmaps").join(&svg);
+            if pixmap.is_file() {
+                return Some(pixmap);
+            }
+        }
+        None
+    }
+
+    /// Determines how app `id` can be uninstalled/deleted, if at all.
+    fn delete_kind(&self, id: &str, entry: &DesktopEntry) -> Option<DeleteKind> {
+        if let Some((app_id, scope)) = entry.flatpak_target(id) {
+            return self
+                .has_flatpak
+                .then_some(DeleteKind::Flatpak { app_id, scope });
+        }
+        if is_user_desktop_path(&entry.path) {
+            return Some(DeleteKind::DesktopFile(entry.path.clone()));
+        }
+        if self.apt_remove && !is_protected_desktop_id(id) {
+            return Some(DeleteKind::AptPackage(entry.path.clone()));
+        }
+        None
     }
 }
 
@@ -692,7 +827,12 @@ impl Platform for LinuxPlatform {
     fn quick_action_app(&self, action: QuickAction) -> Option<String> {
         match action {
             QuickAction::KdeConnect => Some(KDE_CONNECT.to_owned()),
-            QuickAction::Input => self.input_app(),
+            QuickAction::Input => {
+                let input = self.device.input()?;
+                let app = self.input_app()?;
+                self.device.record_input_selected(&input.id);
+                Some(app)
+            }
             _ => None,
         }
     }
@@ -704,6 +844,10 @@ impl Platform for LinuxPlatform {
 
     fn device_settings(&self) -> Option<Arc<dyn DeviceSettings>> {
         Some(self.device.clone())
+    }
+
+    fn note_activity(&self) {
+        self.device.note_activity();
     }
 
     fn scales_apps(&self) -> bool {
@@ -733,6 +877,32 @@ impl Platform for LinuxPlatform {
         if let Some(tasks) = &self.tasks {
             tasks.close_app(id);
         }
+    }
+
+    fn can_delete_app(&self, id: &str) -> bool {
+        let entries = self.entries.borrow();
+        entries
+            .get(id)
+            .is_some_and(|entry| self.delete_kind(id, entry).is_some())
+    }
+
+    fn delete_app(
+        &mut self,
+        id: &str,
+    ) -> Result<Box<dyn FnOnce() -> Result<(), PlatformError> + Send>, PlatformError> {
+        let kind = {
+            let entries = self.entries.borrow();
+            let entry = entries
+                .get(id)
+                .ok_or_else(|| PlatformError::not_launchable(id))?;
+            self.delete_kind(id, entry).ok_or_else(|| {
+                PlatformError::call("delete_app", "this app cannot be deleted from RustTV")
+            })?
+        };
+        // Stop the app if it is currently running and drop any saved UI scale.
+        self.close_app(id);
+        self.set_app_scale(id, 100);
+        Ok(Box::new(move || execute_delete(kind)))
     }
 
     fn last_app(&self) -> Option<String> {
@@ -884,6 +1054,7 @@ struct DesktopEntry {
     not_show_in: Vec<String>,
     try_exec: Option<String>,
     wm_class: Option<String>,
+    flatpak: Option<String>,
 }
 
 impl DesktopEntry {
@@ -935,7 +1106,34 @@ impl DesktopEntry {
             not_show_in: list("NotShowIn"),
             try_exec: get("TryExec").filter(|program| !program.is_empty()),
             wm_class: get("StartupWMClass").filter(|class| !class.is_empty()),
+            flatpak: get("X-Flatpak").filter(|id| !id.is_empty()),
         })
+    }
+
+    /// Returns the Flatpak app ID and installation scope if this entry came
+    /// from Flatpak (`X-Flatpak=` key or `flatpak/exports/share/applications`).
+    fn flatpak_target(&self, desktop_id: &str) -> Option<(String, FlatpakScope)> {
+        let path_str = self.path.to_string_lossy();
+        let from_export = path_str.contains("/flatpak/exports/share/applications/");
+        let app_id = self.flatpak.clone().or_else(|| {
+            from_export.then(|| {
+                desktop_id
+                    .strip_suffix(".desktop")
+                    .unwrap_or(desktop_id)
+                    .to_owned()
+            })
+        })?;
+        if !is_safe_pkg_id(&app_id) {
+            return None;
+        }
+        let scope = if path_str.contains("/.local/share/flatpak/") {
+            FlatpakScope::User
+        } else if path_str.starts_with("/var/lib/flatpak/") {
+            FlatpakScope::System
+        } else {
+            FlatpakScope::Auto
+        };
+        Some((app_id, scope))
     }
 
     /// Lower-case app IDs the app's windows may have: `StartupWMClass`, the
@@ -1155,6 +1353,173 @@ fn program_exists(program: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlatpakScope {
+    User,
+    System,
+    Auto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeleteKind {
+    Flatpak { app_id: String, scope: FlatpakScope },
+    DesktopFile(PathBuf),
+    AptPackage(PathBuf),
+}
+
+fn is_safe_pkg_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('-')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+'))
+}
+
+fn is_protected_desktop_id(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    lower.contains("rusttv")
+}
+
+/// True when `path` is a user-owned `.desktop` file outside system read-only
+/// directories (e.g. `~/.local/share/applications/` or a test temp dir).
+fn is_user_desktop_path(path: &Path) -> bool {
+    if path.starts_with("/usr/")
+        || path.starts_with("/var/lib/flatpak/")
+        || path.starts_with("/snap/")
+        || path.starts_with("/var/lib/snapd/")
+    {
+        return false;
+    }
+    path.extension().is_some_and(|ext| ext == "desktop")
+        && path
+            .parent()
+            .and_then(|dir| fs::metadata(dir).ok())
+            .is_some_and(|meta| !meta.permissions().readonly())
+}
+
+fn has_program(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+}
+
+fn detect_apt_remove() -> bool {
+    if !has_program("dpkg") || !has_program("dpkg-query") || !has_program("apt-get") {
+        return false;
+    }
+    if rustix::process::geteuid().is_root() {
+        return true;
+    }
+    has_program("sudo")
+        && Command::new("sudo")
+            .args(["-n", "true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+}
+
+fn execute_delete(kind: DeleteKind) -> Result<(), PlatformError> {
+    match kind {
+        DeleteKind::Flatpak { app_id, scope } => {
+            let mut cmd = Command::new("flatpak");
+            cmd.arg("uninstall").arg("-y").arg("--noninteractive");
+            match scope {
+                FlatpakScope::User => {
+                    cmd.arg("--user");
+                }
+                FlatpakScope::System => {
+                    cmd.arg("--system");
+                }
+                FlatpakScope::Auto => {}
+            }
+            let output = cmd
+                .arg(&app_id)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| PlatformError::call("flatpak", error.to_string()))?;
+            if output.status.success() {
+                log::info!("uninstalled Flatpak app {app_id}");
+                Ok(())
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr);
+                let line = err.trim().lines().next().unwrap_or("uninstall failed");
+                Err(PlatformError::call("flatpak", line))
+            }
+        }
+        DeleteKind::DesktopFile(path) => {
+            fs::remove_file(&path)
+                .map_err(|error| PlatformError::call("delete_app", error.to_string()))?;
+            log::info!("deleted desktop entry {}", path.display());
+            Ok(())
+        }
+        DeleteKind::AptPackage(path) => {
+            let owner = Command::new("dpkg")
+                .arg("-S")
+                .arg(&path)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| PlatformError::call("dpkg", error.to_string()))?;
+            if !owner.status.success() {
+                return Err(PlatformError::call(
+                    "delete_app",
+                    "not owned by an installed package",
+                ));
+            }
+            let stdout = String::from_utf8_lossy(&owner.stdout);
+            let pkg = stdout
+                .lines()
+                .next()
+                .and_then(|line| line.split(':').next())
+                .map(str::trim)
+                .filter(|name| is_safe_pkg_id(name))
+                .ok_or_else(|| PlatformError::call("dpkg", "could not identify package"))?;
+            if pkg.starts_with("rusttv") {
+                return Err(PlatformError::call("delete_app", "cannot uninstall RustTV"));
+            }
+            // Refuse Essential packages so system integrity is never harmed.
+            let essential = Command::new("dpkg-query")
+                .args(["-W", "-f=${Essential}", pkg])
+                .stdin(Stdio::null())
+                .output()
+                .ok()
+                .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "yes");
+            if essential {
+                return Err(PlatformError::call(
+                    "delete_app",
+                    format!("{pkg} is an essential system package"),
+                ));
+            }
+            let mut cmd = if rustix::process::geteuid().is_root() {
+                let mut c = Command::new("apt-get");
+                c.args(["remove", "-y", pkg]);
+                c
+            } else {
+                let mut c = Command::new("sudo");
+                c.args(["-n", "apt-get", "remove", "-y", pkg]);
+                c
+            };
+            let output = cmd
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| PlatformError::call("apt-get", error.to_string()))?;
+            if output.status.success() {
+                log::info!("removed apt package {pkg}");
+                Ok(())
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr);
+                let line = err
+                    .trim()
+                    .lines()
+                    .next()
+                    .unwrap_or("package removal failed");
+                Err(PlatformError::call("apt-get", line))
+            }
+        }
+    }
+}
+
 /// Decodes a PNG file into an RGBA [`Bitmap`].
 /// Draws an SVG icon with its longer side [`SVG_PIXELS`] long.
 fn decode_svg(path: &Path) -> Result<Bitmap, String> {
@@ -1260,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn an_svg_icon_is_drawn_256_pixels_wide_with_straight_alpha() {
+    fn an_svg_icon_is_drawn_128_pixels_wide_with_straight_alpha() {
         let path = std::env::temp_dir().join(format!("rusttv-icon-{}.svg", std::process::id()));
         fs::write(
             &path,
@@ -1269,12 +1634,12 @@ mod tests {
         .unwrap();
         let bitmap = decode_svg(&path).unwrap();
         fs::remove_file(&path).unwrap();
-        assert_eq!((bitmap.width(), bitmap.height()), (256, 128));
+        assert_eq!((bitmap.width(), bitmap.height()), (128, 64));
         // Top left: half-transparent red, not premultiplied; top right: empty.
         let first = &bitmap.rgba()[..4];
         assert_eq!(first[0], 255);
         assert!((126..=129).contains(&first[3]), "{first:?}");
-        assert_eq!(bitmap.rgba()[255 * 4 + 3], 0);
+        assert_eq!(bitmap.rgba()[127 * 4 + 3], 0);
     }
 
     #[test]
@@ -1401,6 +1766,21 @@ mod tests {
             input_change(None, "signal 1920x1080@60"),
             (Some(true), false)
         );
+        // Startup-on-signal triggers on the very first signal line.
+        assert_eq!(
+            input_change_with_policy(None, "signal 1920x1080@60", false, true, true),
+            (Some(true), true)
+        );
+        // After startup, absent -> signal triggers auto-switch when enabled.
+        assert_eq!(
+            input_change_with_policy(None, "signal 1920x1080@60", true, false, true),
+            (Some(true), true)
+        );
+        // Auto-switch off suppresses switching on newly arriving signal.
+        assert_eq!(
+            input_change_with_policy(Some(false), "signal 1920x1080@60", true, false, false),
+            (Some(true), false)
+        );
     }
 
     #[test]
@@ -1429,6 +1809,47 @@ mod tests {
         assert_eq!(ids, ["kde-two.desktop", "one.desktop"]);
         assert!(!platform.take_apps_changed().expect("changed"));
         assert!(platform.launch("missing.desktop").is_err());
+        // User desktop entries can be deleted directly.
+        assert!(platform.can_delete_app("one.desktop"));
+        let work = platform.delete_app("one.desktop").expect("delete task");
+        work().expect("delete succeeds");
+        assert!(!apps.join("one.desktop").exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finds_breeze_places_and_fallback_icon_names() {
+        let root = std::env::temp_dir().join(format!("rusttv-icons-{}", std::process::id()));
+        let places = root.join("icons/breeze/places/48");
+        fs::create_dir_all(&places).expect("icon dir");
+        let target = places.join("system-file-manager.svg");
+        fs::write(&target, "<svg xmlns='http://www.w3.org/2000/svg'/>").expect("write");
+        let platform = LinuxPlatform::new(vec![root.clone()], Vec::new(), None);
+        assert_eq!(
+            platform.find_icon("system-file-manager"),
+            Some(target.clone())
+        );
+        assert_eq!(
+            platform.find_icon("system-file-manager-symbolic"),
+            Some(target)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn detects_flatpak_app_id_and_scope() {
+        let path = Path::new(
+            "/home/tv/.local/share/flatpak/exports/share/applications/org.videolan.VLC.desktop",
+        );
+        let entry = DesktopEntry::parse(
+            "[Desktop Entry]\nType=Application\nName=VLC\nExec=flatpak run org.videolan.VLC\nX-Flatpak=org.videolan.VLC\n",
+            path,
+            None,
+        )
+        .expect("entry");
+        assert_eq!(
+            entry.flatpak_target("org.videolan.VLC.desktop"),
+            Some(("org.videolan.VLC".to_owned(), FlatpakScope::User))
+        );
     }
 }
