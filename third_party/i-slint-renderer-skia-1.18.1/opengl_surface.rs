@@ -3,6 +3,9 @@
 
 // cSpell: ignore fboid
 use std::num::NonZeroU32;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use std::{cell::RefCell, sync::Arc};
 
 use glutin::{
@@ -128,12 +131,14 @@ impl super::Surface for OpenGLSurface {
 
         let mut surface = self.surface.borrow_mut();
 
-        let width = size.width.try_into().ok();
-        let height = size.height.try_into().ok();
+        let (render_w, render_h, scale_x, scale_y) = Self::scaled_dimensions(size);
+        let mut resized = false;
 
-        if let Some((width, height)) = width.zip(height)
+        if let Some((width, height)) =
+            i32::try_from(render_w.get()).ok().zip(i32::try_from(render_h.get()).ok())
             && (width != surface.width() || height != surface.height())
         {
+            self.glutin_surface.resize(current_context, render_w, render_h);
             *surface = Self::create_internal_surface(
                 self.fb_info,
                 current_context,
@@ -141,34 +146,47 @@ impl super::Surface for OpenGLSurface {
                 width,
                 height,
             )?;
+            resized = true;
         }
 
         let skia_canvas = surface.canvas();
 
         skia_canvas.save();
-        callback(
-            skia_canvas,
-            Some(gr_context),
-            u8::try_from(self.glutin_surface.buffer_age()).unwrap_or_default(),
-        );
+        if scale_x != 1.0 || scale_y != 1.0 {
+            skia_canvas.scale((scale_x, scale_y));
+        }
+        let buffer_age = if resized {
+            0
+        } else {
+            u8::try_from(self.glutin_surface.buffer_age()).unwrap_or_default()
+        };
+        let dirty_region = callback(skia_canvas, Some(gr_context), buffer_age);
         skia_canvas.restore();
 
         if let Some(pre_present_callback) = pre_present_callback.borrow_mut().as_mut() {
             pre_present_callback();
         }
 
-        self.glutin_surface.swap_buffers(current_context).map(|_| DrawOutcome::Success).map_err(
-            |glutin_error| {
-                format!("Skia OpenGL Renderer: Error swapping buffers: {glutin_error}").into()
-            },
-        )
+        let swap_size = PhysicalWindowSize::new(render_w.get(), render_h.get());
+        let swap_result = Self::swap_with_optional_damage(
+            &self.glutin_surface,
+            current_context,
+            _window.scale_factor() * scale_x,
+            _window.scale_factor() * scale_y,
+            swap_size,
+            dirty_region.as_ref(),
+        );
+        swap_result.map(|_| DrawOutcome::Success).map_err(|glutin_error| {
+            format!("Skia OpenGL Renderer: Error swapping buffers: {glutin_error}").into()
+        })
     }
 
     fn resize_event(&self, size: PhysicalWindowSize) -> Result<(), PlatformError> {
         self.ensure_context_current()?;
 
-        if let Some((width, height)) = size.width.try_into().ok().zip(size.height.try_into().ok()) {
-            self.glutin_surface.resize(&self.glutin_context, width, height);
+        if size.width > 0 && size.height > 0 {
+            let (render_w, render_h, _, _) = Self::scaled_dimensions(size);
+            self.glutin_surface.resize(&self.glutin_context, render_w, render_h);
         }
 
         Ok(())
@@ -238,12 +256,7 @@ impl OpenGLSurface {
         config_builder: glutin::config::ConfigTemplateBuilder,
         config_filter: Option<&dyn Fn(&glutin::config::Config) -> bool>,
     ) -> Result<Self, PlatformError> {
-        let width: std::num::NonZeroU32 = size.width.try_into().map_err(|_| {
-            format!("Attempting to create window surface with an invalid width: {}", size.width)
-        })?;
-        let height: std::num::NonZeroU32 = size.height.try_into().map_err(|_| {
-            format!("Attempting to create window surface with an invalid height: {}", size.height)
-        })?;
+        let (width, height, _, _) = Self::scaled_dimensions(size);
 
         let window_handle = window_handle
             .window_handle()
@@ -304,10 +317,10 @@ impl OpenGLSurface {
         // growing. A parked context keeps this limit when it is reused.
         gr_context.set_resource_cache_limit(24 * 1024 * 1024);
 
-        let width: i32 = size.width.try_into().map_err(|e| {
+        let width_i32: i32 = width.get().try_into().map_err(|e| {
                 format!("Attempting to create window surface with width that doesn't fit into non-zero i32: {e}")
             })?;
-        let height: i32 = size.height.try_into().map_err(|e| {
+        let height_i32: i32 = height.get().try_into().map_err(|e| {
                 format!(
                     "Attempting to create window surface with height that doesn't fit into non-zero i32: {e}"
                 )
@@ -317,8 +330,8 @@ impl OpenGLSurface {
             fb_info,
             &current_glutin_context,
             &mut gr_context,
-            width,
-            height,
+            width_i32,
+            height_i32,
         )?
         .into();
 
@@ -436,20 +449,30 @@ impl OpenGLSurface {
 
         let config_template = config_template_builder.build();
 
+        let prefer_opaque =
+            std::env::var_os("SLINT_SKIA_OPAQUE_SURFACE").is_some_and(|v| v != "0");
+
         let config = unsafe {
             gl_display
                 .find_configs(config_template)
                 .map_err(|e| format!("Could not find valid OpenGL display configurations: {e}"))?
                 .filter(|config| config_filter.as_ref().is_none_or(|filter_fn| filter_fn(config)))
                 .reduce(|accum, config| {
-                    let transparency_check = config.supports_transparency().unwrap_or(false)
-                        & !accum.supports_transparency().unwrap_or(false);
-
-                    if transparency_check || config.num_samples() < accum.num_samples() {
-                        config
-                    } else {
-                        accum
+                    // Never prefer MSAA over non-MSAA (costly on tile-based embedded GPUs).
+                    if config.num_samples() < accum.num_samples() {
+                        return config;
                     }
+                    if config.num_samples() > accum.num_samples() {
+                        return accum;
+                    }
+                    let cfg_alpha = config.supports_transparency().unwrap_or(false);
+                    let acc_alpha = accum.supports_transparency().unwrap_or(false);
+                    let better_alpha = if prefer_opaque {
+                        !cfg_alpha && acc_alpha
+                    } else {
+                        cfg_alpha && !acc_alpha
+                    };
+                    if better_alpha { config } else { accum }
                 })
                 .ok_or("Unable to find suitable GL config")?
         };
@@ -578,6 +601,75 @@ impl OpenGLSurface {
         }
     }
 
+    /// Reads the live UI render height cap from `$XDG_CONFIG_HOME/rusttv/render-height`
+    /// (written by Settings → Display) or falls back to `SLINT_SKIA_MAX_HEIGHT`.
+    /// Cached for 250 ms so normal 60 fps rendering performs zero syscalls per frame
+    /// while live resolution changes in Settings take effect immediately.
+    fn current_max_height() -> Option<u32> {
+        struct Cache {
+            checked: Instant,
+            path: Option<PathBuf>,
+            env_fallback: Option<u32>,
+            value: Option<u32>,
+        }
+        static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let entry = guard.get_or_insert_with(|| {
+            let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
+            let path = var("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| var("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .map(|dir| dir.join("rusttv").join("render-height"));
+            let env_fallback = std::env::var("SLINT_SKIA_MAX_HEIGHT")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|&h| h >= 240);
+            let value = path
+                .as_deref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(|h| (h >= 240).then_some(h))
+                .unwrap_or(env_fallback);
+            Cache { checked: now, path, env_fallback, value }
+        });
+        if now.duration_since(entry.checked) >= Duration::from_millis(250) {
+            entry.checked = now;
+            entry.value = entry
+                .path
+                .as_deref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .map(|h| (h >= 240).then_some(h))
+                .unwrap_or(entry.env_fallback);
+        }
+        entry.value
+    }
+
+    /// Optionally caps the EGL render buffer height (e.g. `720` on a 1920×1080
+    /// display), relying on Wayland `wp_viewporter` (already configured by
+    /// `winit`) to hardware-scale the buffer back to full screen at 0 ms GPU cost.
+    fn scaled_dimensions(size: PhysicalWindowSize) -> (NonZeroU32, NonZeroU32, f32, f32) {
+        let max_h = Self::current_max_height();
+        let w = size.width.max(1);
+        let h = size.height.max(1);
+        if let Some(cap) = max_h
+            && h > cap
+        {
+            let sy = cap as f32 / h as f32;
+            // Round width to the nearest even pixel (exact 1366×768, 854×480, etc.).
+            let sw = (((w as f32 * sy) / 2.0).round() as u32 * 2).max(2);
+            let sx = sw as f32 / w as f32;
+            return (
+                NonZeroU32::new(sw).unwrap(),
+                NonZeroU32::new(cap).unwrap(),
+                sx,
+                sy,
+            );
+        }
+        (NonZeroU32::new(w).unwrap(), NonZeroU32::new(h).unwrap(), 1.0, 1.0)
+    }
+
     fn ensure_context_current(&self) -> Result<(), PlatformError> {
         if !self.glutin_context.is_current() {
             self.glutin_context.make_current(&self.glutin_surface).map_err(
@@ -587,6 +679,52 @@ impl OpenGLSurface {
             )?;
         }
         Ok(())
+    }
+
+    fn swap_with_optional_damage(
+        surface: &glutin::surface::Surface<glutin::surface::WindowSurface>,
+        context: &glutin::context::PossiblyCurrentContext,
+        scale_x: f32,
+        scale_y: f32,
+        size: PhysicalWindowSize,
+        dirty_region: Option<&DirtyRegion>,
+    ) -> glutin::error::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let (
+            glutin::surface::Surface::Egl(egl_surface),
+            glutin::context::PossiblyCurrentContext::Egl(egl_context),
+            Some(region),
+        ) = (surface, context, dirty_region)
+        {
+            let win_w = size.width as i32;
+            let win_h = size.height as i32;
+            if win_w > 0 && win_h > 0 {
+                let mut rects = Vec::new();
+                for rect in region.iter() {
+                    let x0 = (rect.min.x * scale_x).floor() as i32;
+                    let y0 = (rect.min.y * scale_y).floor() as i32;
+                    let x1 = (rect.max.x * scale_x).ceil() as i32;
+                    let y1 = (rect.max.y * scale_y).ceil() as i32;
+                    let cx0 = x0.clamp(0, win_w);
+                    let cy0 = y0.clamp(0, win_h);
+                    let cx1 = x1.clamp(cx0, win_w);
+                    let cy1 = y1.clamp(cy0, win_h);
+                    let w = cx1 - cx0;
+                    let h = cy1 - cy0;
+                    if w > 0 && h > 0 {
+                        // EGL surface damage origin is bottom-left.
+                        rects.push(glutin::surface::Rect::new(cx0, win_h - cy1, w, h));
+                    }
+                }
+                if !rects.is_empty() {
+                    return egl_surface
+                        .swap_buffers_with_damage(egl_context, &rects)
+                        .or_else(|_| surface.swap_buffers(context));
+                }
+            }
+        }
+        let _ = (scale_x, scale_y, size, dirty_region);
+        surface.swap_buffers(context)
     }
 }
 
