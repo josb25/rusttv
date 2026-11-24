@@ -33,9 +33,9 @@ export global Theme {
     in-out property <int> layout-style: 0;
     // Tiles per row on Home (1..=8; ignored in carousel).
     in-out property <int> columns: 6;
-    // Tile shape: 0 wide (16:9), 1 square (1:1), 2 poster (4:3), 3 row (list item).
+    // Tile shape: 0 wide (16:9), 1 square (1:1), 2 poster (4:3), 3 row (list item), 4 circle (1:1 round).
     in-out property <int> tile-aspect: 0;
-    // Tile card skin: 0 card, 1 glass, 2 outline, 3 poster (overlay title), 4 minimal.
+    // Tile card skin: 0 card, 1 glass, 2 outline, 3 poster (overlay title), 4 minimal, 5 dock-icon.
     in-out property <int> tile-style: 0;
     // Resting tile border (0 = none) and dimming of unfocused tiles (0..=0.55).
     in-out property <float> tile-border-width: 0.0;
@@ -45,21 +45,29 @@ export global Theme {
     in-out property <float> tile-gap: 48.0;
     in-out property <float> grid-margin-x: 90.0;
 
-    // Hero presentation: alignment (0 start, 1 center, 2 end), artwork card, title size/weight.
+    // Hero presentation: alignment (0 start, 1 center, 2 end), artwork card, title size/weight/position.
     in-out property <int> hero-align: 0;
     in-out property <bool> hero-artwork: true;
     in-out property <float> hero-title-size: 68.0;
     in-out property <int> hero-title-weight: 600;
+    // 0 default, 1 above-dock, 2 top-start (tvOS bold top-left display title).
+    in-out property <int> hero-title-position: 0;
 
     // Focus treatment:
-    // 0 ring, 1 glow, 2 bar, 3 lift, 4 fill (accent inversion), 5 underline.
+    // 0 ring, 1 glow, 2 bar, 3 lift, 4 fill (accent inversion), 5 underline, 6 glass-pill.
     in-out property <int> focus-style: 0;
     // Optional rounded container behind the dock shelf or sidebar rail.
     in-out property <bool> dock-surface: false;
-    // Top bar style: 0 floating, 1 strip, 2 minimal.
+    // Optical frosted glass blur inside the dock container (uses pre-baked blurred backdrop).
+    in-out property <bool> dock-blur: false;
+    // Optional dock corner radius override (0 = inherit panel-radius).
+    in-out property <float> dock-radius: 0.0;
+    // Optional section label above row 0 (e.g. "Your apps").
+    in-out property <string> section-label: "";
+    // Top bar style: 0 floating, 1 strip, 2 minimal, 3 inline-labels, 4 bare-icons, 5 glass-pills, 6 google-tv.
     in-out property <int> top-bar-style: 0;
     // Clock placement & typography:
-    // 0 top-end, 1 top-start, 2 top-center, 3 bottom-end, 4 hidden, 5 center-hero.
+    // 0 top-end, 1 top-start, 2 top-center, 3 bottom-end, 4 hidden, 5 center-hero, 6 greeting-header.
     in-out property <int> clock-position: 0;
     in-out property <float> clock-size: 34.0;
     in-out property <int> clock-weight: 400;
@@ -103,6 +111,9 @@ export global Theme {
     in-out property <image> bg-image;
     in-out property <bool> has-bg-image: false;
     in-out property <float> bg-image-opacity: 0.35;
+    // Pre-baked Gaussian-blurred backdrop for optical frosted-glass docks.
+    in-out property <image> bg-blurred-image;
+    in-out property <bool> has-bg-blurred: false;
 }
 
 // Hints that only say which keys move around (Back returns, Up and Down

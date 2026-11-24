@@ -157,6 +157,10 @@ pub enum TileStyle {
     Poster,
     /// Borderless floating artwork with clean typography underneath.
     Minimal,
+    /// Unframed dock icon with label centered inside the bottom of the tile
+    /// (Projectivy frosted-dock look).
+    #[serde(rename = "dock-icon")]
+    DockIcon,
 }
 
 impl TileStyle {
@@ -167,6 +171,7 @@ impl TileStyle {
             Self::Outline => 2,
             Self::Poster => 3,
             Self::Minimal => 4,
+            Self::DockIcon => 5,
         }
     }
 }
@@ -258,6 +263,8 @@ pub enum TileAspect {
     Poster,
     /// Compact horizontal list row (icon + label side by side, ideal for Sidebar).
     Row,
+    /// Circular 1:1 app icons (Google TV style).
+    Circle,
 }
 
 impl TileAspect {
@@ -267,6 +274,7 @@ impl TileAspect {
             Self::Square => 1,
             Self::Poster => 2,
             Self::Row => 3,
+            Self::Circle => 4,
         }
     }
 }
@@ -311,6 +319,10 @@ pub enum FocusStyle {
     Fill,
     /// Minimalist accent underline below the focused tile.
     Underline,
+    /// Frosted translucent glass card highlight enclosing icon + label
+    /// (Projectivy frosted-dock focus style).
+    #[serde(rename = "glass-pill")]
+    GlassPill,
 }
 
 impl FocusStyle {
@@ -322,13 +334,14 @@ impl FocusStyle {
             Self::Lift => 3,
             Self::Fill => 4,
             Self::Underline => 5,
+            Self::GlassPill => 6,
         }
     }
 }
 
 /// Top quick-action bar presentation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum TopBarStyle {
     /// Floating pills in the top-end corner (default).
     #[default]
@@ -337,6 +350,14 @@ pub enum TopBarStyle {
     Strip,
     /// Subtle low-opacity floating pills until focused.
     Minimal,
+    /// Borderless monochrome icon + text label inline in the top-end corner.
+    InlineLabels,
+    /// Clean borderless monochrome icons in the top-end corner.
+    BareIcons,
+    /// Stadium frosted glass pills with hairline borders and icon + label.
+    GlassPills,
+    /// Google TV top bar: left pill navigation tabs, right circular icon buttons.
+    GoogleTv,
 }
 
 impl TopBarStyle {
@@ -345,6 +366,33 @@ impl TopBarStyle {
             Self::Floating => 0,
             Self::Strip => 1,
             Self::Minimal => 2,
+            Self::InlineLabels => 3,
+            Self::BareIcons => 4,
+            Self::GlassPills => 5,
+            Self::GoogleTv => 6,
+        }
+    }
+}
+
+/// Where the focused app's hero title is placed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HeroTitlePosition {
+    /// Standard hero position for the active layout style.
+    #[default]
+    Default,
+    /// Directly above the dock/shelf, aligned to the grid start edge.
+    AboveDock,
+    /// Bold display title in the top-start corner of the hero canvas (tvOS style).
+    TopStart,
+}
+
+impl HeroTitlePosition {
+    pub const fn as_i32(self) -> i32 {
+        match self {
+            Self::Default => 0,
+            Self::AboveDock => 1,
+            Self::TopStart => 2,
         }
     }
 }
@@ -366,6 +414,8 @@ pub enum ClockPosition {
     Hidden,
     /// Large centerpiece clock on the Home canvas (ideal for `zen` wallpaper skins).
     CenterHero,
+    /// Greeting line above large clock + vertical divider + uppercase date in top-start.
+    GreetingHeader,
 }
 
 impl ClockPosition {
@@ -377,6 +427,7 @@ impl ClockPosition {
             Self::BottomEnd => 3,
             Self::Hidden => 4,
             Self::CenterHero => 5,
+            Self::GreetingHeader => 6,
         }
     }
 }
@@ -548,7 +599,7 @@ impl ThemeTypography {
 }
 
 /// Layout and motion settings of a theme.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ThemeLayout {
     pub style: LayoutStyle,
     /// Tiles per row on Home (`1..=8`; ignored in `Carousel` mode).
@@ -570,9 +621,18 @@ pub struct ThemeLayout {
     pub hero_artwork: bool,
     /// Hero title font size in reference pixels (`40..=96`).
     pub hero_title_size: f32,
+    /// Where the hero title sits (`default`, `above-dock`, `top-start`).
+    pub hero_title_position: HeroTitlePosition,
     pub focus_style: FocusStyle,
     /// Whether to draw a rounded container behind the dock shelf or sidebar rail.
     pub dock_surface: bool,
+    /// Pre-bake a blurred wallpaper copy for optical frosted-glass dock containers.
+    pub dock_blur: bool,
+    /// Optional corner radius override for the floating dock container (`0..=48`;
+    /// `0` inherits `panel_radius`).
+    pub dock_radius: f32,
+    /// Optional section label above row 0 (e.g. `"Your apps"`).
+    pub section_label: String,
     pub top_bar_style: TopBarStyle,
     pub clock_position: ClockPosition,
     /// Tile corner radius in reference pixels (0..=32).
@@ -618,8 +678,12 @@ impl ThemeLayout {
             hero_align: HeroAlign::Start,
             hero_artwork: true,
             hero_title_size: 68.0,
+            hero_title_position: HeroTitlePosition::Default,
             focus_style: FocusStyle::Ring,
             dock_surface: false,
+            dock_blur: false,
+            dock_radius: 0.0,
+            section_label: String::new(),
             top_bar_style: TopBarStyle::Floating,
             clock_position: ClockPosition::TopEnd,
             tile_radius: 12.0,
@@ -863,8 +927,12 @@ struct RawLayout {
     hero_align: Option<HeroAlign>,
     hero_artwork: Option<bool>,
     hero_title_size: Option<f32>,
+    hero_title_position: Option<HeroTitlePosition>,
     focus_style: Option<FocusStyle>,
     dock_surface: Option<bool>,
+    dock_blur: Option<bool>,
+    dock_radius: Option<f32>,
+    section_label: Option<String>,
     top_bar_style: Option<TopBarStyle>,
     clock_position: Option<ClockPosition>,
     tile_radius: Option<f32>,
@@ -1212,8 +1280,20 @@ pub fn parse_theme(text: &str, id: String, base_dir: Option<&Path>) -> Result<Th
             40.0,
             96.0,
         ),
+        hero_title_position: raw
+            .layout
+            .hero_title_position
+            .unwrap_or(def_layout.hero_title_position),
         focus_style: raw.layout.focus_style.unwrap_or(def_layout.focus_style),
         dock_surface: raw.layout.dock_surface.unwrap_or(def_layout.dock_surface),
+        dock_blur: raw.layout.dock_blur.unwrap_or(def_layout.dock_blur),
+        dock_radius: clamp_finite(raw.layout.dock_radius, def_layout.dock_radius, 0.0, 48.0),
+        section_label: raw
+            .layout
+            .section_label
+            .as_deref()
+            .map(|s| clean_text(s, 40))
+            .unwrap_or(def_layout.section_label),
         top_bar_style: raw.layout.top_bar_style.unwrap_or(def_layout.top_bar_style),
         clock_position: raw
             .layout
@@ -1471,6 +1551,9 @@ pub struct BakedBackdrop {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+    /// Optional downscaled Gaussian-blurred copy for optical frosted-glass
+    /// dock surfaces (`dock_blur = true`), computed once on theme load.
+    pub blurred: Option<(u32, u32, Vec<u8>)>,
 }
 
 /// Composites a theme's static background (gradient, wallpaper image, and
@@ -1612,7 +1695,95 @@ pub fn bake_backdrop(spec: &ThemeSpec, right_to_left: bool) -> Option<BakedBackd
             rgb.push(c[2].round().clamp(0.0, 255.0) as u8);
         }
     }
-    Some(BakedBackdrop { width, height, rgb })
+    let blurred = spec
+        .layout
+        .dock_blur
+        .then(|| blur_backdrop(&rgb, width, height));
+    Some(BakedBackdrop {
+        width,
+        height,
+        rgb,
+        blurred,
+    })
+}
+
+/// Downsamples an RGB backdrop to 320×180 and applies a 3-pass separable box
+/// blur (approximating a ~24px Gaussian blur at 1080p) for zero-cost frosted
+/// glass docks.
+fn blur_backdrop(src: &[u8], w: u32, h: u32) -> (u32, u32, Vec<u8>) {
+    let bw = 320usize;
+    let bh = 180usize;
+    let sw = w as usize;
+    let sh = h as usize;
+    let mut cur = vec![0u8; bw * bh * 3];
+    for y in 0..bh {
+        let sy0 = y * sh / bh;
+        let sy1 = ((y + 1) * sh / bh).max(sy0 + 1).min(sh);
+        for x in 0..bw {
+            let sx0 = x * sw / bw;
+            let sx1 = ((x + 1) * sw / bw).max(sx0 + 1).min(sw);
+            let mut sum = [0u32; 3];
+            let mut count = 0u32;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let i = (sy * sw + sx) * 3;
+                    sum[0] += u32::from(src[i]);
+                    sum[1] += u32::from(src[i + 1]);
+                    sum[2] += u32::from(src[i + 2]);
+                    count += 1;
+                }
+            }
+            let dst = (y * bw + x) * 3;
+            cur[dst] = (sum[0] / count) as u8;
+            cur[dst + 1] = (sum[1] / count) as u8;
+            cur[dst + 2] = (sum[2] / count) as u8;
+        }
+    }
+
+    let radius = 9usize;
+    let mut tmp = vec![0u8; bw * bh * 3];
+    for _ in 0..3 {
+        // Horizontal pass
+        for y in 0..bh {
+            let row = y * bw;
+            for x in 0..bw {
+                let x0 = x.saturating_sub(radius);
+                let x1 = (x + radius + 1).min(bw);
+                let n = (x1 - x0) as u32;
+                let mut sum = [0u32; 3];
+                for sx in x0..x1 {
+                    let i = (row + sx) * 3;
+                    sum[0] += u32::from(cur[i]);
+                    sum[1] += u32::from(cur[i + 1]);
+                    sum[2] += u32::from(cur[i + 2]);
+                }
+                let d = (row + x) * 3;
+                tmp[d] = (sum[0] / n) as u8;
+                tmp[d + 1] = (sum[1] / n) as u8;
+                tmp[d + 2] = (sum[2] / n) as u8;
+            }
+        }
+        // Vertical pass
+        for y in 0..bh {
+            let y0 = y.saturating_sub(radius);
+            let y1 = (y + radius + 1).min(bh);
+            let n = (y1 - y0) as u32;
+            for x in 0..bw {
+                let mut sum = [0u32; 3];
+                for sy in y0..y1 {
+                    let i = (sy * bw + x) * 3;
+                    sum[0] += u32::from(tmp[i]);
+                    sum[1] += u32::from(tmp[i + 1]);
+                    sum[2] += u32::from(tmp[i + 2]);
+                }
+                let d = (y * bw + x) * 3;
+                cur[d] = (sum[0] / n) as u8;
+                cur[d + 1] = (sum[1] / n) as u8;
+                cur[d + 2] = (sum[2] / n) as u8;
+            }
+        }
+    }
+    (bw as u32, bh as u32, cur)
 }
 
 #[cfg(not(all(target_os = "linux", feature = "linux")))]

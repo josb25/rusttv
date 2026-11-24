@@ -146,12 +146,16 @@ export component QuickBar inherits Rectangle {
     // The pointer moved onto entry `index`.
     callback hovered(int);
 
-    property <length> size: 72 * u;
-    property <length> gap: 18 * u;
-    property <length> link-width: 44 * u;
+    property <bool> labeled-bar: Theme.top-bar-style == 3 || Theme.top-bar-style == 5;
+    property <bool> bare-icons: Theme.top-bar-style == 4;
+    property <bool> google-tv-bar: Theme.top-bar-style == 6;
+    property <length> size: bare-icons || google-tv-bar ? 56 * u : 72 * u;
+    property <length> gap: bare-icons || google-tv-bar ? 14 * u : 18 * u;
+    property <length> link-width: bare-icons || google-tv-bar ? 36 * u : 44 * u;
     // How much wider the Network entry is than a round one.
     property <length> net-extra: max(0px, links.length * link-width + 28 * u - size);
-    property <length> bar-width: max(0px, actions.length * (size + gap) - gap + net-extra);
+    property <length> brand-w: google-tv-bar ? 116 * u : 0px;
+    property <length> icon-bar-width: max(0px, actions.length * (size + gap) - gap + net-extra) + brand-w;
 
     // Left edge of entry `i` (code `code`) in left-to-right order, and its width.
     pure function start(i: int, code: int) -> length {
@@ -197,79 +201,162 @@ export component QuickBar inherits Rectangle {
         return "M 12 2.5 L 12 11 M 6.5 5.5 A 8 8 0 1 0 17.5 5.5";
     }
 
-    width: bar-width;
-    height: size;
+    width: labeled-bar ? labeled-row.preferred-width : icon-bar-width;
+    height: labeled-bar ? (Theme.top-bar-style == 5 ? 46 : 52) * u : size;
 
-    for code[i] in actions: button := Rectangle {
-        property <bool> focused: i == selected;
-        property <color> ink: focused ? Theme.bg : (root.dimmed ? Theme.text.with-alpha(0.58) : Theme.text);
-        width: root.span(code);
-        x: rtl ? root.width - root.start(i, code) - self.width : root.start(i, code);
-        height: size;
-        border-radius: self.height / 2;
-        background: focused ? Theme.text : (root.dimmed ? #00000038 : #0000005C);
-        animate background { duration: 120ms * Theme.motion-scale; }
-        if code != 3 || links.length == 0: Path {
-            x: (parent.width - parent.height * 0.5) / 2;
-            y: parent.height * 0.25;
-            width: parent.height * 0.5;
-            height: parent.height * 0.5;
-            viewbox-width: 24;
-            viewbox-height: 24;
-            commands: root.icon(code);
-            stroke: parent.ink;
-            stroke-width: 2.6 * u;
-            fill: transparent;
-        }
-        // Network: one icon per interface; the dim full icon under a Wi-Fi's
-        // bars, a dim socket for an unplugged cable.
-        if code == 3: Rectangle {
-            x: 14 * u;
-            width: parent.width - 28 * u;
-            for link[j] in links: Rectangle {
-                property <bool> is-wifi: link < 200;
-                property <bool> up: is-wifi ? link > 100 : link == 201;
-                x: rtl ? parent.width - (j + 1) * root.link-width : j * root.link-width;
-                width: root.link-width;
-                Path {
-                    x: (parent.width - 36 * u) / 2;
-                    y: (root.size - 36 * u) / 2;
-                    width: 36 * u;
-                    height: 36 * u;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: parent.is-wifi ? root.wifi(4) : root.wired;
-                    stroke: button.ink;
-                    stroke-width: 2.6 * u;
-                    fill: transparent;
-                    opacity: parent.up && !parent.is-wifi ? 1 : 0.35;
+    // Inline-labels (`top_bar_style = "inline-labels"`, Projectivy Glass) and
+    // stadium glass pills (`top_bar_style = "glass-pills"`, Ambient Pills).
+    labeled-row := HorizontalLayout {
+        visible: root.labeled-bar;
+        spacing: (Theme.top-bar-style == 5 ? 10 : 28) * u;
+        for code[i] in actions: pill := Rectangle {
+            property <bool> focused: i == selected;
+            property <bool> is-glass-pill: Theme.top-bar-style == 5;
+            property <color> ink: focused && is-glass-pill ? Theme.bg : Theme.text;
+            height: (is-glass-pill ? 46 : 52) * u;
+            width: inner.preferred-width;
+            border-radius: self.height / 2;
+            background: is-glass-pill
+                ? (focused ? Theme.text : #FFFFFF18)
+                : (focused ? #FFFFFF2E : transparent);
+            border-width: is-glass-pill ? 1.5 * u : (focused ? 1.5 * u : 0px);
+            border-color: is-glass-pill
+                ? (focused ? Theme.text : #FFFFFF48)
+                : #FFFFFF66;
+            animate background { duration: 120ms * Theme.motion-scale; }
+
+            inner := HorizontalLayout {
+                padding-left: (pill.is-glass-pill ? 18 : 12) * u;
+                padding-right: (pill.is-glass-pill ? 20 : 12) * u;
+                height: parent.height;
+                spacing: (pill.is-glass-pill ? 8 : 10) * u;
+                alignment: center;
+                Rectangle {
+                    width: (pill.is-glass-pill ? 20 : 24) * u;
+                    height: parent.height;
+                    Path {
+                        x: 0;
+                        y: (parent.height - parent.width) / 2;
+                        width: parent.width;
+                        height: parent.width;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: root.icon(code);
+                        stroke: pill.ink;
+                        stroke-width: 2.2 * u;
+                        fill: transparent;
+                    }
                 }
-                if is-wifi && up: Path {
-                    x: (parent.width - 36 * u) / 2;
-                    y: (root.size - 36 * u) / 2;
-                    width: 36 * u;
-                    height: 36 * u;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: root.wifi(link - 100);
-                    stroke: button.ink;
-                    stroke-width: 2.6 * u;
-                    fill: transparent;
+                Text {
+                    text: root.name(code);
+                    font-size: (pill.is-glass-pill ? 18 : 22) * u;
+                    font-weight: pill.focused ? 600 : 400;
+                    color: pill.ink;
+                    vertical-alignment: center;
                 }
             }
-        }
-        TouchArea {
-            mouse-cursor: pointer;
-            pointer-event(event) => {
-                if event.kind == PointerEventKind.move {
-                    root.hovered(i);
+            TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.move {
+                        root.hovered(i);
+                    }
                 }
+                clicked => { root.clicked(i); }
             }
-            clicked => { root.clicked(i); }
         }
     }
-    if selected >= 0: Text {
-        property <length> centre: (rtl ? root.width - root.start(selected, actions[selected]) - root.span(actions[selected]) : root.start(selected, actions[selected])) + root.span(actions[selected]) / 2;
+
+    // Round icon buttons (floating, strip, minimal, bare-icons, google-tv).
+    if !root.labeled-bar: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        for code[i] in actions: button := Rectangle {
+            property <bool> focused: i == selected;
+            property <color> ink: focused ? Theme.bg : (root.dimmed ? Theme.text.with-alpha(0.58) : Theme.text);
+            width: root.span(code);
+            x: rtl ? root.width - root.start(i, code) - self.width - root.brand-w : root.start(i, code);
+            height: size;
+            border-radius: self.height / 2;
+            background: focused ? Theme.text
+                : root.bare-icons ? transparent
+                : root.google-tv-bar ? #FFFFFF1E
+                : (root.dimmed ? #00000038 : #0000005C);
+            animate background { duration: 120ms * Theme.motion-scale; }
+            if code != 3 || links.length == 0: Path {
+                x: (parent.width - parent.height * 0.5) / 2;
+                y: parent.height * 0.25;
+                width: parent.height * 0.5;
+                height: parent.height * 0.5;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: root.icon(code);
+                stroke: parent.ink;
+                stroke-width: (root.bare-icons || root.google-tv-bar ? 2.2 : 2.6) * u;
+                fill: transparent;
+            }
+            // Network: one icon per interface; the dim full icon under a Wi-Fi's
+            // bars, a dim socket for an unplugged cable.
+            if code == 3: Rectangle {
+                x: 14 * u;
+                width: parent.width - 28 * u;
+                for link[j] in links: Rectangle {
+                    property <bool> is-wifi: link < 200;
+                    property <bool> up: is-wifi ? link > 100 : link == 201;
+                    x: rtl ? parent.width - (j + 1) * root.link-width : j * root.link-width;
+                    width: root.link-width;
+                    Path {
+                        x: (parent.width - 32 * u) / 2;
+                        y: (root.size - 32 * u) / 2;
+                        width: 32 * u;
+                        height: 32 * u;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: parent.is-wifi ? root.wifi(4) : root.wired;
+                        stroke: button.ink;
+                        stroke-width: 2.4 * u;
+                        fill: transparent;
+                        opacity: parent.up && !parent.is-wifi ? 1 : 0.35;
+                    }
+                    if is-wifi && up: Path {
+                        x: (parent.width - 32 * u) / 2;
+                        y: (root.size - 32 * u) / 2;
+                        width: 32 * u;
+                        height: 32 * u;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: root.wifi(link - 100);
+                        stroke: button.ink;
+                        stroke-width: 2.4 * u;
+                        fill: transparent;
+                    }
+                }
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.move {
+                        root.hovered(i);
+                    }
+                }
+                clicked => { root.clicked(i); }
+            }
+        }
+        // Google TV trailing wordmark ("RustTV") next to the circular buttons.
+        if root.google-tv-bar: Text {
+            x: rtl ? 0px : parent.width - root.brand-w + 20 * u;
+            width: root.brand-w - 20 * u;
+            height: parent.height;
+            text: "RustTV";
+            font-size: 24 * u;
+            font-weight: 500;
+            color: Theme.text.with-alpha(0.72);
+            vertical-alignment: center;
+            horizontal-alignment: rtl ? left : right;
+        }
+    }
+    if !root.labeled-bar && selected >= 0: Text {
+        property <length> centre: (rtl ? root.width - root.start(selected, actions[selected]) - root.span(actions[selected]) - root.brand-w : root.start(selected, actions[selected])) + root.span(actions[selected]) / 2;
         x: rtl ? max(self.centre - 160 * u, -60 * u) : min(self.centre - 160 * u, root.width + 60 * u - 320 * u);
         y: size + 14 * u;
         width: 320 * u;

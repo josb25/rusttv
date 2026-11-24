@@ -12,8 +12,13 @@ RustTV supports built-in and user-authored UI skins defined as small, declarativ
 
 ## Reference Skins (`themes/`)
 
-Eight ready-to-use reference skins demonstrating distinct launcher architectures are included in [`themes/`](themes/):
+Thirteen ready-to-use reference skins demonstrating distinct launcher architectures are included in [`themes/`](themes/):
 
+- **`projectivy-glass.toml`** (*Projectivy Glass*) — Full-bleed coastal wallpaper (`coastal-cliff.svg`), top-left clean clock, borderless inline-label top-right controls (`inline-labels`), optical pre-baked frosted-glass floating bottom dock (`dock_blur = true`), unframed dock icons with labels inside (`dock-icon`), and frosted glass-pill focus (`glass-pill`).
+- **`projectivy-minimal.toml`** (*Projectivy Minimal*) — Same full-bleed coastal wallpaper and optical frosted-glass bottom dock, paired with borderless monochrome top-right icons (`bare-icons`).
+- **`apple-tv.toml`** (*Apple TV*) — Full-bleed warm cinematic backdrop (`mars-horizon.svg`), bold top-left display title (`hero_title_position = "top-start"`), auto-hiding top bar, floating frosted-glass 5-card top-shelf dock with borderless focus lift, and row 2 peeking at the bottom edge.
+- **`google-tv.toml`** (*Google TV*) — Top-left pill navigation strip with solid white `Apps` pill, compact circular top-right buttons + `RustTV` wordmark (`top_bar_style = "google-tv"`), cinematic hero fade (`cinema-hero.svg`), `"Your apps"` section heading, and true circular app icons (`tile_aspect = "circle"`) with crisp white focus ring.
+- **`ambient-pills.toml`** (*Ambient Pills*) — Deep near-black canvas lit by vivid app-colour ambient glow, top-left greeting + clock + vertical divider + uppercase date (`clock_position = "greeting-header"`), top-right stadium glass pills (`top_bar_style = "glass-pills"`), focused app title directly above a wide 4-column framed dock (`hero_title_position = "above-dock"`), and row 2 peeking at the bottom.
 - **`horizon-zen.toml`** (*Horizon Zen*) — Wallpaper-first minimalist zen screen with a vector SVG landscape backdrop (`horizon-backdrop.svg`), an ultra-light 116px centered hero clock, frosted floating bottom dock, unfocused tile dimming, underline focus, and translucent tinted overlays.
 - **`obsidian-blade.toml`** (*Obsidian Blade*) — Full-height edge-to-edge media-center navigation blade with electric cyan fill-highlights, wide live showcase preview, and consistent cyan accent selection across Settings and Quick Panels.
 - **`glass-dock.toml`** (*Glass Dock*) — Floating frosted bottom dock with 5 large rounded cards, borderless focus lift, top-start clock, subtle translucent glass chrome, and clean tinted overlays.
@@ -59,8 +64,8 @@ icon_card_tint = 0.14        # 0.0..=0.5 tint on Linux icon-only cards toward ap
 [layout]
 style = "blade"              # "shelf" | "dock" | "sidebar" | "blade" | "grid" | "carousel" | "zen"
 columns = 1                  # 1..=8 tiles per row (ignored in "carousel" style)
-tile_aspect = "row"          # "wide" (16:9) | "square" (1:1) | "poster" (4:3) | "row" (list)
-tile_style = "glass"         # "card" | "glass" | "outline" | "poster" | "minimal"
+tile_aspect = "row"          # "wide" (16:9) | "square" (1:1) | "poster" (4:3) | "row" (list) | "circle" (1:1 round)
+tile_style = "glass"         # "card" | "glass" | "outline" | "poster" | "minimal" | "dock-icon"
 tile_border_width = 1.0      # 0..=4 rpx subtle resting hairline on unfocused tiles
 tile_border_color = "#FFFFFF22" # Colour of resting tile border
 tile_dim_unfocused = 0.0     # 0.0..=0.55 darken unfocused tiles to spotlight selection
@@ -70,10 +75,14 @@ hero = "full"                # "full" | "compact" | "off"
 hero_align = "end"           # "start" | "center" | "end"
 hero_artwork = true          # Show focused app preview card in hero
 hero_title_size = 64         # 40..=96 rpx hero title font size
-focus_style = "fill"         # "ring" | "glow" | "bar" | "lift" | "fill" | "underline"
+hero_title_position = "default" # "default" | "above-dock" | "top-start"
+focus_style = "fill"         # "ring" | "glow" | "bar" | "lift" | "fill" | "underline" | "glass-pill"
 dock_surface = true          # Draw container behind dock shelf or sidebar/blade rail
-top_bar_style = "minimal"    # "floating" | "strip" | "minimal"
-clock_position = "top-start" # "top-end" | "top-start" | "top-center" | "bottom-end" | "center-hero" | "hidden"
+dock_blur = false            # Pre-bake optical frosted-glass blur behind the dock
+dock_radius = 0              # 0..=48 rpx dock corner radius override (0 = inherit panel_radius)
+section_label = ""           # Optional section heading above row 0 (e.g. "Your apps")
+top_bar_style = "minimal"    # "floating" | "strip" | "minimal" | "inline-labels" | "bare-icons" | "glass-pills" | "google-tv"
+clock_position = "top-start" # "top-end" | "top-start" | "top-center" | "bottom-end" | "center-hero" | "greeting-header" | "hidden"
 tile_radius = 8              # 0..=32 rpx
 panel_radius = 12            # 0..=36 rpx (Settings, Quick Panel, Folders, Context & Power menus)
 focus_scale = 1.01           # 1.0..=1.25 focused tile zoom

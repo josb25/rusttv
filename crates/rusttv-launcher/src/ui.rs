@@ -605,8 +605,12 @@ fn apply_theme(window: &HomeWindow, spec: &ThemeSpec) {
     theme.set_hero_artwork(spec.layout.hero_artwork);
     theme.set_hero_title_size(spec.layout.hero_title_size);
     theme.set_hero_title_weight(spec.typography.hero_title_weight);
+    theme.set_hero_title_position(spec.layout.hero_title_position.as_i32());
     theme.set_focus_style(spec.layout.focus_style.as_i32());
     theme.set_dock_surface(spec.layout.dock_surface);
+    theme.set_dock_blur(spec.layout.dock_blur);
+    theme.set_dock_radius(spec.layout.dock_radius);
+    theme.set_section_label(spec.layout.section_label.as_str().into());
     theme.set_top_bar_style(spec.layout.top_bar_style.as_i32());
     theme.set_clock_position(spec.layout.clock_position.as_i32());
     theme.set_clock_size(spec.typography.clock_size);
@@ -651,12 +655,23 @@ fn apply_theme(window: &HomeWindow, spec: &ThemeSpec) {
             theme.set_has_bg_image(true);
             theme.set_bg_image_opacity(1.0);
             theme.set_has_gradient(false);
+            if let Some((bw, bh, ref brgb)) = baked.blurred {
+                theme.set_bg_blurred_image(slint::Image::from_rgb8(
+                    SharedPixelBuffer::clone_from_slice(brgb, bw, bh),
+                ));
+                theme.set_has_bg_blurred(true);
+            } else {
+                theme.set_bg_blurred_image(slint::Image::default());
+                theme.set_has_bg_blurred(false);
+            }
         }
         None => {
             theme.set_bg_image(slint::Image::default());
             theme.set_has_bg_image(false);
             theme.set_bg_image_opacity(0.0);
             theme.set_has_gradient(false);
+            theme.set_bg_blurred_image(slint::Image::default());
+            theme.set_has_bg_blurred(false);
         }
     }
     // Pre-tint the coloured focus-glow shadow once on theme switch (zero
@@ -7327,5 +7342,89 @@ mod tests {
             "toast: {}",
             screen.window.get_toast()
         );
+    }
+
+    /// Headless software renderer for visually inspecting the 5 reference skins.
+    /// Run with: `RUSTTV_SKIN_OUT=/path cargo test -p rusttv-launcher --features linux -- --ignored render_reference_skin_previews`
+    #[cfg(all(target_os = "linux", feature = "linux"))]
+    #[test]
+    #[ignore = "renders reference skin PNG previews on demand"]
+    fn render_reference_skin_previews() {
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use slint::platform::{Platform as SlintPlatform, WindowAdapter};
+
+        struct HeadlessBackend {
+            window: Rc<MinimalSoftwareWindow>,
+        }
+        impl SlintPlatform for HeadlessBackend {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.window.clone())
+            }
+        }
+
+        let sw_window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        sw_window.set_size(slint::PhysicalSize::new(1280, 720));
+        slint::platform::set_platform(Box::new(HeadlessBackend {
+            window: sw_window.clone(),
+        }))
+        .expect("headless software platform");
+
+        let out_dir = PathBuf::from(
+            std::env::var("RUSTTV_SKIN_OUT").unwrap_or_else(|_| "/tmp/skin-previews".to_owned()),
+        );
+        std::fs::create_dir_all(&out_dir).expect("create output dir");
+        let themes_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("themes");
+
+        let platform = FakePlatform::sample().with_device();
+        let shared = Shared {
+            platform: Rc::new(RefCell::new(platform)),
+            ..Shared::default()
+        };
+        let options = RunOptions::default();
+        let clock: Clock = Box::new(|| Duration::from_secs(10));
+        let (window, _controller) = start(shared, options, clock).expect("start");
+        window.show().expect("show");
+        window.set_clock_text("1:13 PM".into());
+        window.set_greeting_text("GOOD AFTERNOON".into());
+        window.set_date_text("SATURDAY  17 OCTOBER".into());
+
+        let skins = [
+            "projectivy-glass",
+            "projectivy-minimal",
+            "apple-tv",
+            "google-tv",
+            "ambient-pills",
+        ];
+        let mut buf = vec![slint::Rgb8Pixel::new(0, 0, 0); 1280 * 720];
+        for name in skins {
+            let path = themes_dir.join(format!("{name}.toml"));
+            let spec = crate::theme::load_file(&path, format!("user:{name}")).expect("load theme");
+            apply_theme(&window, &spec);
+            slint::platform::update_timers_and_animations();
+            sw_window.draw_if_needed(|renderer| {
+                renderer.render(&mut buf, 1280);
+            });
+            // Force a full repaint even if not dirty.
+            sw_window.request_redraw();
+            sw_window.draw_if_needed(|renderer| {
+                renderer.render(&mut buf, 1280);
+            });
+            let mut bytes = Vec::with_capacity(1280 * 720 * 3);
+            for px in &buf {
+                bytes.push(px.r);
+                bytes.push(px.g);
+                bytes.push(px.b);
+            }
+            let out_path = out_dir.join(format!("{name}.png"));
+            let file = std::fs::File::create(&out_path).expect("create png");
+            let mut encoder = png::Encoder::new(file, 1280, 720);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer.write_image_data(&bytes).expect("png data");
+        }
     }
 }

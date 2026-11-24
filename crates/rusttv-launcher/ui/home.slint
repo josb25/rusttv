@@ -551,7 +551,7 @@ component Tile inherits Rectangle {
     Image {
         property <length> pad-x: card.width * (24.0 / 160.0);
         property <length> pad-y: card.height * (24.0 / 90.0);
-        visible: focused && Effects.shadows && !row-layout && Theme.tile-style != 4 && !launching;
+        visible: focused && Effects.shadows && !row-layout && Theme.tile-style != 4 && Theme.tile-style != 5 && !launching;
         x: card.x - self.pad-x;
         y: card.y - self.pad-y
             - (sway-amount > 0 ? sway-amount * 3 * u * sin(sway-turns * 360deg) : 0px)
@@ -575,7 +575,7 @@ component Tile inherits Rectangle {
         // Keep opacity strictly 1.0 during browsing so Skia never allocates
         // an offscreen `saveLayer` FBO per unfocused tile on Mali-G31.
         opacity: launching ? 0 : 1;
-        border-radius: Theme.tile-radius * u;
+        border-radius: Theme.tile-aspect == 4 ? self.width / 2 : Theme.tile-radius * u;
         background: row-layout
             ? (focused
                 ? (Theme.focus-style == 4 ? Theme.accent : Theme.surface)
@@ -584,8 +584,65 @@ component Tile inherits Rectangle {
 
         animate opacity { duration: launching ? 500ms : 0ms; easing: cubic-bezier(0.25, 0.1, 0.25, 1); }
 
-        // Standard card artwork (wide / square / poster).
-        if !row-layout: Rectangle {
+        // Frosted glass-pill focus highlight (`focus_style = "glass-pill"`):
+        // translucent glass card enclosing both icon and label inside the dock.
+        if !row-layout && focused && !launching && Theme.focus-style == 6: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: parent.border-radius;
+            background: @linear-gradient(180deg, #FFFFFF3C 0%, #FFFFFF16 100%);
+            border-width: 1.5 * u;
+            border-color: #FFFFFF66;
+        }
+
+        // Unframed dock icon layout (`tile_style = "dock-icon"`, Projectivy Glass):
+        // clean centered icon + label inside the tile, zero card background when unfocused.
+        if !row-layout && Theme.tile-style == 5: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: parent.border-radius;
+            clip: true;
+
+            Rectangle {
+                property <length> icon-h: min(parent.height * 0.48, parent.width * 0.54);
+                property <length> icon-w: data.kind == 0 ? min(parent.width * 0.72, self.icon-h * 1.65) : self.icon-h;
+                x: (parent.width - self.icon-w) / 2;
+                y: parent.height * 0.14;
+                width: self.icon-w;
+                height: self.icon-h;
+                border-radius: data.kind == 0 ? 12 * u : 0px;
+                clip: data.kind == 0;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.data.image;
+                    image-fit: root.data.kind == 1 ? contain : cover;
+                    visible: root.data.kind == 0 || root.data.kind == 1 || root.data.kind == 5 || root.data.kind == 6;
+                }
+                if root.data.kind == 3 || root.data.kind == 7 || root.data.kind == 8 || root.data.kind == 9: Artwork {
+                    width: parent.width;
+                    height: parent.height;
+                    data: root.data;
+                    u: root.u * 0.6;
+                }
+            }
+            Text {
+                x: 10 * u;
+                y: parent.height * 0.68;
+                width: parent.width - 20 * u;
+                height: parent.height * 0.26;
+                text: root.tile-title;
+                font-size: 22 * u;
+                font-weight: focused ? 600 : 400;
+                color: focused ? Theme.text : Theme.text.with-alpha(0.86);
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // Standard card artwork (wide / square / poster / circle).
+        if !row-layout && Theme.tile-style != 5: Rectangle {
             width: parent.width;
             height: parent.height;
             border-radius: parent.border-radius;
@@ -731,7 +788,7 @@ component Tile inherits Rectangle {
         }
 
         // The focused tile's ring (shown in ring/glow/bar/fill modes, or while moving).
-        if focused && !launching && (jiggle || (Theme.focus-style != 3 && Theme.focus-style != 5 && Theme.focus-ring-width > 0 && !(row-layout && (Theme.focus-style == 2 || Theme.focus-style == 4)))): Rectangle {
+        if focused && !launching && (jiggle || (Theme.focus-style != 3 && Theme.focus-style != 5 && Theme.focus-style != 6 && Theme.focus-ring-width > 0 && !(row-layout && (Theme.focus-style == 2 || Theme.focus-style == 4)))): Rectangle {
             width: parent.width;
             height: parent.height;
             border-radius: parent.border-radius;
@@ -765,8 +822,8 @@ component Tile inherits Rectangle {
     // Name under the tile (focused only by default, or always/never per theme).
     // Slint has no text shadow, so a dark copy offset by (0, 2) stands in for
     // a soft label shadow.
-    // Poster cards (`tile-style == 3`) already show their title overlaid inside.
-    property <bool> show-label: !row-layout && !launching && Theme.tile-style != 3 && data.kind != 1 && data.kind != 2
+    // Poster cards (`tile-style == 3`) and dock-icon cards (`tile-style == 5`) already show their title inside.
+    property <bool> show-label: !row-layout && !launching && Theme.tile-style != 3 && Theme.tile-style != 5 && data.kind != 1 && data.kind != 2
         && (Theme.show-labels == 1 || (Theme.show-labels == 0 && focused));
     if Effects.shadows && label-text.opacity > 0: Text {
         x: 0;
@@ -801,6 +858,8 @@ component HeroLayer inherits Rectangle {
     in property <TileData> data;
     in property <Glow> glow;
     in property <length> u;
+    // Where the dock/shelf starts, used when `hero_title_position == "above-dock"`.
+    in property <length> shelf-y: 800 * u;
     // How much it shows, 0..1. Set on each part rather than as the layer's
     // opacity: that would render the whole screen into an extra layer on
     // every frame of a cross-fade, more than a weak TV GPU manages at 60 fps.
@@ -888,6 +947,19 @@ component HeroLayer inherits Rectangle {
             animate-load: false;
         }
     }
+    // Subtle top-center chevron hint in tvOS top-start hero mode (`hero_title_position == 2`).
+    if Theme.hero-title-position == 2 && Theme.hero-mode < 2 && root.fade > 0: Path {
+        x: (parent.width - 28 * u) / 2;
+        y: 22 * u;
+        width: 28 * u;
+        height: 14 * u;
+        viewbox-width: 24;
+        viewbox-height: 12;
+        commands: "M 2 10 L 12 2 L 22 10";
+        stroke: Theme.text.with-alpha(0.75 * root.fade);
+        stroke-width: 3.0 * u;
+        fill: transparent;
+    }
     Text {
         property <bool> compact: Theme.hero-mode == 1;
         property <bool> sidebar: Theme.layout-style == 2 || Theme.layout-style == 5;
@@ -898,10 +970,12 @@ component HeroLayer inherits Rectangle {
             : centered ? (parent.width - self.width) / 2
             : compact && Theme.hero-artwork ? Dir.x((Theme.grid-margin-x + 396) * u, self.width, parent.width)
             : Dir.x(Theme.grid-margin-x * u, self.width, parent.width);
-        y: (sidebar ? (Theme.hero-artwork ? 620 : 420)
-            : compact ? 236
-            : Theme.layout-style == 4 ? (Theme.hero-artwork ? 500 : 340)
-            : Theme.hero-artwork ? 640 : 420) * u;
+        y: Theme.hero-title-position == 1 ? root.shelf-y - 108 * u
+            : Theme.hero-title-position == 2 ? 72 * u
+            : (sidebar ? (Theme.hero-artwork ? 620 : 420)
+                : compact ? 236
+                : Theme.layout-style == 4 ? (Theme.hero-artwork ? 500 : 340)
+                : Theme.hero-artwork ? 640 : 420) * u;
         horizontal-alignment: centered ? center : end-aligned ? (Dir.rtl ? left : right) : Dir.start;
         text: data.kind == 3 ? "RustTV" : data.kind == 5 ? @tr("Hidden apps") : data.kind == 6 ? @tr("Settings") : data.kind == 8 ? @tr("RustTV Remote") : data.kind == 9 ? @tr("History") : data.label;
         font-size: (compact ? min(Theme.hero-title-size, 52.0) : Theme.hero-title-size) * u;
@@ -924,7 +998,7 @@ component StatusCorner inherits Rectangle {
 
     property <length> glyph: 40 * u;
     property <length> gap: 20 * u;
-    height: max(72 * u, Theme.clock-size * 1.25 * u);
+    height: max((Theme.top-bar-style == 3 || Theme.top-bar-style == 4 ? 52 : 72) * u, Theme.clock-size * 1.25 * u);
     width: clock-text.preferred-width + glyphs.length * (glyph + gap);
 
     for picture[i] in glyphs: Image {
@@ -1150,6 +1224,8 @@ export component HomeWindow inherits Window {
     // a minute while Home is on screen, and the glyphs of panels that need
     // attention (at most two).
     in property <string> clock-text;
+    in property <string> greeting-text;
+    in property <string> date-text;
     in property <[image]> corner-glyphs;
     // The banner over Home: shown while `banner-shown`; its words stay
     // while it fades out.
@@ -1382,13 +1458,13 @@ export component HomeWindow inherits Window {
         : is-carousel ? 340 * u
         : (1920 * u - 2 * root.margin-x - (root.cols - 1) * root.gap) / root.cols;
     property <length> tile-h: Theme.tile-aspect == 3 ? 84 * u
-        : Theme.tile-aspect == 1 ? root.tile-w
+        : (Theme.tile-aspect == 1 || Theme.tile-aspect == 4) ? root.tile-w
         : Theme.tile-aspect == 2 ? root.tile-w * 0.78
         : root.tile-w * 0.564;
     property <length> step-x: root.tile-w + root.gap;
     property <length> step-y: Theme.tile-aspect == 3
         ? root.tile-h + root.gap
-        : root.tile-h + (Theme.show-labels == 2 || Theme.tile-style == 3 ? 44 * u : 110 * u);
+        : root.tile-h + (Theme.show-labels == 2 || Theme.tile-style == 3 || Theme.tile-style == 5 ? 48 * u : 110 * u);
     // Hero stays visible in Sidebar / Blade / Carousel mode even while scrolling.
     property <float> shelf-fade: (shelf || is-sidebar || is-carousel) ? 1 : 0;
     animate shelf-fade { duration: 180ms * Theme.motion-scale; }
@@ -1413,6 +1489,7 @@ export component HomeWindow inherits Window {
         data: hero-a;
         glow: hero-a-glow;
         u: root.u;
+        shelf-y: root.shelf-y;
         fade: root.hero-a-fade * root.shelf-fade;
         backdrop-fade: root.hero-b-backdrop < 1 ? root.shelf-fade : 0;
     }
@@ -1420,6 +1497,7 @@ export component HomeWindow inherits Window {
         data: hero-b;
         glow: hero-b-glow;
         u: root.u;
+        shelf-y: root.shelf-y;
         fade: root.hero-b-fade * root.shelf-fade;
         backdrop-fade: root.hero-b-backdrop * root.shelf-fade;
     }
@@ -1439,27 +1517,68 @@ export component HomeWindow inherits Window {
     // Where row 0 starts per layout archetype and Theme.hero-mode.
     property <length> shelf-y: root.is-blade ? 140 * u
         : root.is-sidebar ? 148 * u
-        : root.is-zen ? root.height - root.tile-h - 104 * u
+        : root.is-zen ? root.height - root.tile-h - 148 * u
         : (root.is-grid || Theme.hero-mode == 2) ? (Theme.top-bar-style == 1 ? 148 * u : 168 * u)
         : root.is-carousel ? 736 * u
-        : root.is-dock ? root.height - root.tile-h - 108 * u
+        : root.is-dock ? root.height - root.tile-h - (Theme.tile-aspect == 4 ? 72 : 108) * u
         : Theme.hero-mode == 1 ? 480 * u
         : 800 * u;
     property <int> grid-rows: root.is-carousel ? 1 : max(1, ceil(tiles.length / root.cols));
 
     // Optional rounded dock shelf behind row 0 (`style = "dock"` or `"zen"`, `dock_surface = true`).
     if (root.is-dock || root.is-zen) && Theme.dock-surface: Rectangle {
-        x: root.margin-x - 32 * u;
-        y: root.shelf-y - 28 * u;
-        width: root.width - 2 * (root.margin-x - 32 * u);
-        height: root.tile-h + 56 * u;
-        border-radius: Theme.panel-radius * u;
-        background: Theme.dock-bg;
-        border-width: Theme.panel-border-width * u;
-        border-color: Theme.panel-border-color;
+        property <length> pad-x: (Theme.tile-style == 5 ? 18 : 28) * u;
+        property <length> pad-y: (Theme.tile-style == 5 ? 14 : 24) * u;
+        x: root.margin-x - self.pad-x;
+        y: root.shelf-y - self.pad-y;
+        width: root.width - 2 * (root.margin-x - self.pad-x);
+        height: root.tile-h + 2 * self.pad-y;
+        border-radius: (Theme.dock-radius > 0 ? Theme.dock-radius : Theme.panel-radius) * u;
+        clip: true;
+        background: Theme.has-bg-blurred && Theme.dock-blur ? transparent : Theme.dock-bg;
         opacity: shelf ? 1 : 0;
         visible: self.opacity > 0;
         animate opacity { duration: 250ms * Theme.motion-scale; }
+
+        // True optical frosted glass: pre-baked Gaussian-blurred wallpaper aligned to screen space.
+        if Theme.has-bg-blurred && Theme.dock-blur: Image {
+            x: -parent.x;
+            y: -parent.y;
+            width: root.width;
+            height: root.height;
+            source: Theme.bg-blurred-image;
+            image-fit: fill;
+            image-rendering: smooth;
+        }
+        // Translucent frosted glass tint over the blurred backdrop.
+        if Theme.has-bg-blurred && Theme.dock-blur: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: Theme.dock-bg;
+        }
+        // Specular glass border around the dock.
+        if Theme.panel-border-width > 0: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            border-radius: parent.border-radius;
+            border-width: Theme.panel-border-width * u;
+            border-color: Theme.panel-border-color;
+        }
+    }
+
+    // Optional section heading directly above row 0 (e.g. Google TV "Your apps").
+    if Theme.section-label != "": Text {
+        x: Dir.x(root.margin-x, self.width, root.width);
+        y: root.shelf-y - 46 * u;
+        width: root.width - 2 * root.margin-x;
+        text: Theme.section-label;
+        font-size: 22 * u;
+        font-weight: 500;
+        color: Theme.text-dim;
+        horizontal-alignment: Dir.start;
+        opacity: shelf ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: 200ms * Theme.motion-scale; }
     }
 
     // Edge-to-edge full-height Kodi-style navigation blade (`style = "blade"`).
@@ -1518,7 +1637,7 @@ export component HomeWindow inherits Window {
                 : root.is-sidebar
                 ? (self.tile-row >= first-row - 1 && self.tile-row <= first-row + 9)
                 : shelf
-                ? self.tile-row <= (Theme.hero-mode == 2 ? 4 : Theme.hero-mode == 1 ? 3 : 2)
+                ? (root.is-zen || Theme.tile-aspect == 4 ? self.tile-row == 0 : self.tile-row <= (Theme.hero-mode == 2 ? 4 : Theme.hero-mode == 1 ? 3 : 2))
                 : (self.tile-row >= first-row - 1 && self.tile-row <= first-row + 4));
             // Tiles glide to their new place when a move reorders them or in carousel mode.
             animate x, y { duration: (root.mode == Mode.moving || root.is-carousel ? 220ms : 0ms) * Theme.motion-scale; easing: cubic-bezier(0.2, 0.9, 0.3, 1); }
@@ -1539,8 +1658,9 @@ export component HomeWindow inherits Window {
         }
     }
 
-    // Subtle vertical scroll indicator when the Home grid has more rows than fit.
-    if !root.is-carousel && root.grid-rows > (root.is-sidebar ? 7 : 2) && (mode == Mode.browse || mode == Mode.moving): Rectangle {
+    // Subtle vertical scroll indicator when the Home grid has more rows than fit
+    // (hidden on floating dock / zen shelves so the showcase stays uncluttered).
+    if !root.is-carousel && !(shelf && (root.is-dock || root.is-zen)) && root.grid-rows > (root.is-sidebar ? 7 : 2) && (mode == Mode.browse || mode == Mode.moving): Rectangle {
         x: root.is-sidebar
             ? Dir.x(root.margin-x - 20 * u + root.sidebar-w - 14 * u, self.width, root.width)
             : Dir.x(root.width - 30 * u, self.width, root.width);
@@ -1566,8 +1686,12 @@ export component HomeWindow inherits Window {
     // Sidebar / Carousel layouts); Up from the first row reaches it.
     quick-bar := QuickBar {
         property <bool> bar-shown: shelf || root.is-sidebar || root.is-carousel;
-        x: Dir.x(root.width - 90 * u - self.width, self.width, root.width);
-        y: Theme.top-bar-style == 1 ? 20 * u : 48 * u;
+        property <bool> auto-hide: Theme.top-bar-style == 2 && Theme.hero-title-position == 2 && root.mode != Mode.bar && root.mode != Mode.quick;
+        x: Dir.x(root.width - (Theme.top-bar-style == 5 ? root.margin-x : 90 * u) - self.width, self.width, root.width);
+        y: Theme.top-bar-style == 1 ? 20 * u
+            : Theme.top-bar-style == 5 ? 54 * u
+            : Theme.top-bar-style == 6 ? 44 * u
+            : 48 * u;
         u: root.u;
         rtl: Dir.rtl;
         actions: quick-actions;
@@ -1575,14 +1699,121 @@ export component HomeWindow inherits Window {
         links: network-icons;
         input-label: root.input-label;
         dimmed: Theme.top-bar-style == 2 && root.mode != Mode.bar && root.mode != Mode.quick;
-        opacity: self.bar-shown ? 1 : 0;
+        opacity: self.bar-shown && !self.auto-hide ? 1 : 0;
         visible: self.opacity > 0;
         animate opacity { duration: 250ms * Theme.motion-scale; }
         clicked(index) => { root.quick-clicked(index); }
         hovered(index) => { root.quick-hovered(index); }
     }
+    // Google TV top-left pill navigation strip (`top_bar_style = "google-tv"`).
+    if Theme.top-bar-style == 6: HorizontalLayout {
+        x: Dir.x(root.margin-x, self.preferred-width, root.width);
+        y: 44 * u;
+        height: 54 * u;
+        spacing: 28 * u;
+        opacity: shelf ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: 250ms * Theme.motion-scale; }
+
+        Rectangle {
+            width: 48 * u;
+            height: 48 * u;
+            border-radius: 24 * u;
+            background: #FFFFFF22;
+            Path {
+                x: 11 * u;
+                y: 11 * u;
+                width: 26 * u;
+                height: 26 * u;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M 12 4 A 4 4 0 1 0 12 12 A 4 4 0 1 0 12 4 Z M 4 20 A 8 7 0 0 1 20 20";
+                stroke: Theme.text;
+                stroke-width: 2.2 * u;
+                fill: transparent;
+            }
+        }
+        Rectangle {
+            height: 48 * u;
+            width: tab-apps.preferred-width + 44 * u;
+            border-radius: 24 * u;
+            background: #E8EAED;
+            tab-apps := Text {
+                width: parent.width;
+                height: parent.height;
+                text: @tr("Apps");
+                font-size: 22 * u;
+                font-weight: 600;
+                color: #121212;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: @tr("Library");
+            font-size: 22 * u;
+            font-weight: 500;
+            color: Theme.text.with-alpha(0.75);
+            vertical-alignment: center;
+        }
+    }
+
+    // Greeting + large clock + vertical divider + uppercase date (`clock_position = "greeting-header"`).
+    if Theme.clock-position == 6: Rectangle {
+        x: Dir.x(root.margin-x, self.width, root.width);
+        y: 42 * u;
+        width: 820 * u;
+        height: 116 * u;
+        opacity: shelf ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: 250ms * Theme.motion-scale; }
+
+        Text {
+            x: 0;
+            y: 0;
+            text: root.greeting-text;
+            font-size: 18 * u;
+            font-weight: 500;
+            letter-spacing: 2.6 * u;
+            color: Theme.text.with-alpha(0.78);
+        }
+        HorizontalLayout {
+            x: 0;
+            y: 26 * u;
+            height: 76 * u;
+            spacing: 26 * u;
+            alignment: start;
+
+            Text {
+                text: root.clock-text;
+                font-size: Theme.clock-size * u;
+                font-weight: Theme.clock-weight;
+                color: Theme.text;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: 2 * u;
+                height: 76 * u;
+                Rectangle {
+                    y: 16 * u;
+                    width: 2 * u;
+                    height: 44 * u;
+                    background: Theme.text.with-alpha(0.35);
+                }
+            }
+            Text {
+                text: root.date-text;
+                font-size: 17 * u;
+                font-weight: 500;
+                letter-spacing: 1.6 * u;
+                color: Theme.text.with-alpha(0.84);
+                vertical-alignment: center;
+            }
+        }
+    }
+
     // The status corner: position configurable per Theme.clock-position
-    // (0 top-end [default], 1 top-start, 2 top-center, 3 bottom-end, 4 hidden, 5 center-hero).
+    // (0 top-end [default], 1 top-start, 2 top-center, 3 bottom-end, 4 hidden, 5 center-hero, 6 greeting-header).
     StatusCorner {
         property <length> end: 90 * u + (quick-bar.width > 0 ? quick-bar.width + 40 * u : 0);
         property <bool> bar-shown: shelf || root.is-sidebar || root.is-carousel;
@@ -1597,7 +1828,7 @@ export component HomeWindow inherits Window {
         u: root.u;
         clock: clock-text;
         glyphs: corner-glyphs;
-        opacity: Theme.clock-position == 4 ? 0 : (self.bar-shown ? 1 : 0);
+        opacity: (Theme.clock-position == 4 || Theme.clock-position == 6) ? 0 : (self.bar-shown ? 1 : 0);
         visible: self.opacity > 0;
         animate opacity { duration: 250ms * Theme.motion-scale; }
     }
