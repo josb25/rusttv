@@ -72,6 +72,9 @@ Every `skin.slint` imports `{ RustTV, SkinTile, SkinAction } from "@rusttv/skin.
 | `menu-title` | `string` | Title of the long-pressed app |
 | `menu-items` | `[string]` | Context menu actions (`Open`, `Move`, `Hide`, `Force stop`, etc.) |
 | `menu-selected` | `int` | Currently highlighted index in `menu-items` |
+| `quick-actions` | `[SkinAction]` | RustTV's top-right menu entries, in order. `code`: `0` Search, `1` Modify, `2` Audio, `3` Network, `4` KDE Connect, `5` Settings, `6` Power, `7` RustTV, `8` video input (`label` = its name, e.g. `"HDMI"`); `label` is empty for the others, so the skin names and draws them |
+| `quick-selected` | `int` | Focused entry of `quick-actions`, or `-1` while focus is on the tiles |
+| `mode` | `int` | What Home is doing: `0` browse, `1` moving a tile, `2` launching the focused app (draw your launch feedback), `4` long-press menu, `11` top-right menu |
 | `s0..s7` | `string` | Reactive string slots controlled by `skin.rhai` |
 | `i0..i7` | `int` | Reactive integer slots controlled by `skin.rhai` |
 | `f0..f3` | `float` | Reactive float slots controlled by `skin.rhai` |
@@ -82,6 +85,10 @@ Every `skin.slint` imports `{ RustTV, SkinTile, SkinAction } from "@rusttv/skin.
 - `RustTV.tile-clicked(index, long_press)` — wire on every tile's `TouchArea` for mouse/touch support (`false` = launch, `true` = context menu).
 - `RustTV.action(name, arg)` — invokes `on_action(name, arg)` in `skin.rhai`.
 - `RustTV.menu-clicked(index)` — wire on every item in your `if RustTV.menu-open:` overlay for mouse/touch support.
+- `RustTV.quick-clicked(index)` / `RustTV.quick-hovered(index)` — wire on each `quick-actions` button: a click runs the entry (its panel, Settings, Power…), a pointer move focuses it.
+
+### Window title
+Set `title: "RustTV";` exactly. The compositor's Home key raises the window with that title (labwc `rc.xml`), so any other title leaves the user stuck in an app with no way back.
 
 ---
 
@@ -93,7 +100,7 @@ Every `skin.slint` imports `{ RustTV, SkinTile, SkinAction } from "@rusttv/skin.
 - `fn on_focus(index, id, label)` — runs whenever `focused-index` changes; update scroll offset slots and hero subtitles here.
 - `fn on_key(key, pressed) -> bool` — return `true` to consume the key, `false` to fall through to RustTV.
   - Normalized key names passed to `on_key`: `"Up"`, `"Down"`, `"Left"`, `"Right"`, `"Ok"`, `"Back"`, `"Menu"`, plus literal keyboard characters (`"q"`, `"m"`, etc.).
-  - **Important:** When `RustTV.menu-open` is `true`, RustTV routes `Up`/`Down`/`Ok`/`Back` directly to the menu state machine (bypassing `on_key`).
+  - **Important:** When `RustTV.menu-open` is `true`, while focus is in the top-right menu (`quick-selected >= 0`), and while an app launches, RustTV handles keys itself (bypassing `on_key`). Return `false` for `Up` from your first row to let RustTV move focus into its top-right menu.
   - **Important:** When handling `"Ok"` inside a top bar / custom zone, return `true` for **both** `pressed == true` and `pressed == false` so RustTV never receives a stray `OkReleased`.
 - `fn on_action(name, arg)` — handles `RustTV.action(name, arg)` from `TouchArea` clicks.
 
@@ -142,21 +149,19 @@ Every `skin.slint` imports `{ RustTV, SkinTile, SkinAction } from "@rusttv/skin.
 - **Always set `width: self.preferred-width;`** on right-aligned `HorizontalLayout`s (`x: parent.width - self.preferred-width - margin;`). Without explicit `width`, Slint stretches the layout to `parent.width` and pushes right-aligned children off-screen!
 - **Never use `parent.parent`** in Slint — give ancestor elements an explicit `id := Rectangle { ... }` and reference `id.prop`.
 - **Never declare `property <int> col` or `property <int> row`** on a `Rectangle` — `col`/`row` are reserved GridLayout properties in Slint. Use `gcol`/`grow` or `grid-col`/`grid-row`.
-- **GPU texture caching:** Wrap static wallpapers, scrims, and pre-baked frosted dock mats in a `Rectangle { cache-rendering-hint: true; ... }` so Mali-G31 caches them once and Skia partial rendering only repaints the moving focus rect.
+- **GPU texture caching:** Wrap static wallpapers, scrims, and pre-baked frosted dock mats in a `Rectangle { cache-rendering-hint: true; ... }` so low-power TV/embedded GPUs cache them once and Skia partial rendering only repaints the moving focus rect.
 - **No per-frame blur:** Always pre-bake blurred backdrops or generate them once in `on_init()` / `on_tiles_loaded()` via `img_blur` + `set_img_slot`.
 
 ---
 
-## 7. Testing & Deploying a New Skin
+## 7. Testing & Installing a New Skin
 
-1. **Compile & smoke-test locally (in WSL `rusttv-build`):**
+1. **Compile & smoke-test locally:**
    ```bash
-   CARGO_TARGET_DIR=/tmp/rusttv-pr-target cargo test -p rusttv-launcher --features linux skin_runtime
+   cargo test -p rusttv-launcher --features linux skin_runtime
    ```
-   Verify your skin compiles with zero Slint/Rhai errors and passes `on_init` / `on_focus` / `on_key` / `on_action`.
-2. **Deploy to a Linux TV / HY320F projector (no Rust rebuild needed!):**
-   ```powershell
-   scp -r -i "$env:USERPROFILE\.ssh\hy320f_ed25519" C:\Tech\rusttv\themes\my-skin-pro root@hy320f:/usr/share/rusttv/themes/
-   ssh -i "$env:USERPROFILE\.ssh\hy320f_ed25519" root@hy320f 'chmod -R a+rX /usr/share/rusttv/themes/my-skin-pro'
-   ```
-3. **Select in Settings → Theme** (or write `skin:my-skin-pro` to `/home/tv/.local/state/rusttv/theme` and restart) and inspect `/tmp/rusttv.log` for any `WARN: loading programmable skin ... failed:` messages.
+   Verify your skin compiles with zero Slint/Rhai errors and passes `on_init`, `on_tiles_loaded`, `on_focus`, `on_key`, and `on_action`.
+2. **Install on a target device (no Rust rebuild required):**
+   Copy your skin folder into either the user themes directory (`~/.config/rusttv/themes/<skin-id>/`) or the system themes directory (`/usr/share/rusttv/themes/<skin-id>/`), ensuring world-readable permissions (`chmod -R a+rX`).
+3. **Activate & verify:**
+   Select the skin in **Settings → Theme** (or write `skin:<skin-id>` to `~/.local/state/rusttv/theme` and restart RustTV), and check the launcher logs for any `WARN: loading programmable skin ... failed:` diagnostics.

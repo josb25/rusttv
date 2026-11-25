@@ -58,7 +58,7 @@ rusttv-history.workspace = true
 rusttv-remote.workspace = true
 getrandom.workspace = true
 qrcode.workspace = true
-slint-interpreter = { workspace = true, optional = true }
+slint-interpreter = { workspace = true, optional = true, features = ["internal"] }
 rhai = { workspace = true, optional = true }
 
 # Desktop dev mode: window via winit, CPU rendering (no Skia download).

@@ -1,6 +1,6 @@
 schema_version = 2
 name = "Classic Home Pro"
 author = "RustTV"
-description = "Standalone Level 3 peer of the classic RustTV home screen: dynamic hero glow, 4-column card grid, and circular top-right controls"
+description = "The default RustTV home screen as a Level 3 skin: hero with colour backdrop, 6-column card shelf, round top-right menu"
 entry = "skin.slint"
 script = "skin.rhai"

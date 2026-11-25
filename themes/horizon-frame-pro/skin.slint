@@ -54,7 +54,8 @@ component QuietIconButton inherits Rectangle {
 }
 
 export component SkinHome inherits Window {
-    title: "RustTV — Horizon Frame Pro";
+    // Exactly "RustTV": the compositor raises that window on Home (labwc rc.xml).
+    title: "RustTV";
     background: #1D2A30;
     default-font-family: "Geist";
     preferred-width: 1280px;

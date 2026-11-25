@@ -494,7 +494,8 @@ fn extract_glyph_image(
     let bh = (max_y - min_y + 1).max(1);
     let ring_x = (bw / 8).max(2);
     let ring_y = (bh / 8).max(2);
-    let mut buckets: HashMap<(u8, u8, u8), (u64, u64, u64, u64)> = HashMap::new();
+    type ColorBucket = (u64, u64, u64, u64);
+    let mut buckets: HashMap<(u8, u8, u8), ColorBucket> = HashMap::new();
     for y in min_y..=max_y {
         for x in min_x..=max_x {
             let on_ring = x < min_x + ring_x
@@ -1001,6 +1002,8 @@ pub struct SkinInstance {
     instance: ComponentInstance,
     script: Option<SkinScript>,
     mono_cache: RefCell<HashMap<String, slint::Image>>,
+    /// The `quick-actions` last pushed (code, label), to skip identical updates.
+    quick_sig: RefCell<Vec<(i32, String)>>,
 }
 
 impl SkinInstance {
@@ -1012,9 +1015,23 @@ impl SkinInstance {
 
     /// Compiles and instantiates a programmable skin with an optional directory
     /// for persistent `save_pref`/`load_pref` storage.
+    #[allow(dead_code, reason = "part of the public programmable skin host API")]
     pub fn load_with_prefs(
         manifest: &SkinManifest,
         prefs_dir: Option<&Path>,
+    ) -> Result<Self, String> {
+        Self::load_into_window(manifest, prefs_dir, None)
+    }
+
+    /// [`Self::load_with_prefs`], drawing into `window` (the host's) instead
+    /// of a window of its own. The skin's tree becomes the window's at once;
+    /// the host swaps between its own tree and the skin's
+    /// (`ui::one_window`), so no window is created or destroyed when built-in
+    /// pages open over the skin.
+    pub fn load_into_window(
+        manifest: &SkinManifest,
+        prefs_dir: Option<&Path>,
+        window: Option<&slint::Window>,
     ) -> Result<Self, String> {
         let entry_name = manifest
             .entry_path
@@ -1077,9 +1094,11 @@ impl SkinInstance {
         let definition = result.component("SkinHome").ok_or_else(|| {
             "skin.slint must export `component SkinHome inherits Window`".to_owned()
         })?;
-        let instance = definition
-            .create()
-            .map_err(|e| format!("failed to create SkinHome: {e}"))?;
+        let instance = match window {
+            Some(window) => definition.create_with_existing_window(window),
+            None => definition.create(),
+        }
+        .map_err(|e| format!("failed to create SkinHome: {e}"))?;
 
         let prefs_path = prefs_dir.map(|dir| {
             let stem = manifest.id.strip_prefix("skin:").unwrap_or(&manifest.id);
@@ -1102,6 +1121,7 @@ impl SkinInstance {
             instance,
             script,
             mono_cache: RefCell::new(HashMap::new()),
+            quick_sig: RefCell::new(Vec::new()),
         };
         skin.sync_script_slots();
         Ok(skin)
@@ -1114,12 +1134,14 @@ impl SkinInstance {
     }
 
     /// Shows the skin window fullscreen.
+    #[allow(dead_code, reason = "part of the public programmable skin host API")]
     pub fn show(&self) -> Result<(), String> {
         self.instance.window().set_fullscreen(true);
         self.instance.show().map_err(|e| e.to_string())
     }
 
     /// Hides the skin window.
+    #[allow(dead_code, reason = "part of the public programmable skin host API")]
     pub fn hide(&self) -> Result<(), String> {
         self.instance.hide().map_err(|e| e.to_string())
     }
@@ -1321,9 +1343,23 @@ impl SkinInstance {
                 .set_global_property("RustTV", "hero-image", InterpValue::Image(image));
     }
 
-    /// Updates quick-bar actions and selected index on `RustTV`.
-    #[allow(dead_code, reason = "part of the public programmable skin host API")]
+    /// Updates quick-bar actions and selected index on `RustTV`. The action
+    /// list is replaced only when it changed, so the skin's buttons aren't
+    /// rebuilt on every render.
     pub fn set_quick_bar(&self, actions: &[(i32, &str)], selected: i32) {
+        let _ = self.instance.set_global_property(
+            "RustTV",
+            "quick-selected",
+            InterpValue::Number(f64::from(selected)),
+        );
+        let sig: Vec<(i32, String)> = actions
+            .iter()
+            .map(|(code, label)| (*code, (*label).to_owned()))
+            .collect();
+        if *self.quick_sig.borrow() == sig {
+            return;
+        }
+        *self.quick_sig.borrow_mut() = sig;
         let rows: Vec<InterpValue> = actions
             .iter()
             .map(|(code, label)| {
@@ -1337,11 +1373,44 @@ impl SkinInstance {
         let _ =
             self.instance
                 .set_global_property("RustTV", "quick-actions", InterpValue::Model(model));
-        let _ = self.instance.set_global_property(
-            "RustTV",
-            "quick-selected",
-            InterpValue::Number(f64::from(selected)),
-        );
+    }
+
+    /// Updates `RustTV.mode` (home.slint `Mode` values: 0 browse, 1 moving,
+    /// 2 launching, 4 menu, 11 top-right menu, …).
+    pub fn set_mode(&self, mode: i32) {
+        let current = self.instance.get_global_property("RustTV", "mode");
+        if !matches!(current, Ok(InterpValue::Number(n)) if n as i32 == mode) {
+            let _ = self.instance.set_global_property(
+                "RustTV",
+                "mode",
+                InterpValue::Number(f64::from(mode)),
+            );
+        }
+    }
+
+    /// Registers handlers for `RustTV.quick-clicked(index)` and
+    /// `RustTV.quick-hovered(index)` (entries of `quick-actions`).
+    pub fn set_quick_callbacks<FClick, FHover>(&self, on_click: FClick, on_hover: FHover)
+    where
+        FClick: Fn(i32) + 'static,
+        FHover: Fn(i32) + 'static,
+    {
+        let index = |args: &[InterpValue]| match args.first() {
+            Some(InterpValue::Number(n)) => *n as i32,
+            _ => -1,
+        };
+        let _ = self
+            .instance
+            .set_global_callback("RustTV", "quick-clicked", move |args| {
+                on_click(index(args));
+                InterpValue::Void
+            });
+        let _ = self
+            .instance
+            .set_global_callback("RustTV", "quick-hovered", move |args| {
+                on_hover(index(args));
+                InterpValue::Void
+            });
     }
 
     /// Dispatches a custom UI action (`RustTV.action(name, arg)`) to `on_action` in Rhai.
@@ -1799,5 +1868,64 @@ export component SkinHome inherits Window { width: 100px; height: 100px; }
 
         let cmds = skin.dispatch_action("settings", "");
         assert_eq!(cmds, vec![HostCommand::OpenSettings]);
+    }
+
+    #[test]
+    fn bundled_classic_home_pro_navigates_like_the_default_home() {
+        thread_local!(static BACKEND: () = i_slint_backend_testing::init_no_event_loop());
+        BACKEND.with(|_| {});
+
+        let themes_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("themes");
+        let skins = discover_skins(std::slice::from_ref(&themes_dir));
+        let manifest = skins
+            .iter()
+            .find(|s| s.id == "skin:classic-home-pro")
+            .expect("classic-home-pro programmable skin");
+        let mut skin = SkinInstance::load(manifest).expect("compile classic-home-pro");
+        // 20 tiles: rows 0..=2 full, row 3 holds two.
+        let tiles: Vec<SkinTileData> = (0..20)
+            .map(|i| SkinTileData {
+                id: format!("app.{i}"),
+                label: format!("App {i}"),
+                image: slint::Image::default(),
+                kind: 0,
+                running: false,
+                tint: slint::Color::from_argb_u8(0, 0, 0, 0),
+            })
+            .collect();
+        skin.set_tiles(&tiles);
+        let _ = skin.set_focused(0, "app.0", "App 0");
+        assert_eq!(skin.get_int_slot(5), 1, "row 0 is the shelf");
+
+        // Six columns: Down moves by six, Right stops at the row's end.
+        let (handled, cmds) = skin.dispatch_key("Down", true);
+        assert!(handled);
+        assert_eq!(cmds, vec![HostCommand::Focus(6)]);
+        let _ = skin.set_focused(5, "app.5", "App 5");
+        let (_, cmds) = skin.dispatch_key("Right", true);
+        assert!(cmds.is_empty());
+        // Down into the short last row lands on the last tile.
+        let _ = skin.set_focused(17, "app.17", "App 17");
+        let (_, cmds) = skin.dispatch_key("Down", true);
+        assert_eq!(cmds, vec![HostCommand::Focus(19)]);
+        // Three visible rows while scrolled.
+        let _ = skin.set_focused(19, "app.19", "App 19");
+        assert_eq!(skin.get_int_slot(5), 0);
+        assert_eq!(skin.get_int_slot(4), 1);
+
+        // Up from row 0 falls through to RustTV's top-right menu, which the
+        // skin draws from `quick-actions`.
+        let _ = skin.set_focused(2, "app.2", "App 2");
+        assert_eq!(skin.get_int_slot(4), 0);
+        let (handled, _) = skin.dispatch_key("Up", true);
+        assert!(!handled);
+        skin.set_quick_bar(&[(0, ""), (8, "HDMI"), (5, ""), (6, "")], 1);
+
+        // OK on a tile falls through to RustTV (launch / long press).
+        let (handled, _) = skin.dispatch_key("Ok", true);
+        assert!(!handled);
     }
 }

@@ -107,6 +107,10 @@ const KDE_CONNECT: &str = "org.kde.kdeconnect.app.desktop";
 /// again after it ended.
 const WATCH_RESTART: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// util-linux `setpriv`, which starts the video input's watcher so that it ends
+/// with the launcher.
+const SETPRIV: &str = "/usr/bin/setpriv";
+
 /// Runs the video input's `watch` command on a thread of its own, again
 /// whenever it ends, keeps [`LinuxDevice`] updated on live HDMI signal state,
 /// and sends [`AppEvent::InputSignal`] on configured startup HDMI or newly
@@ -142,7 +146,20 @@ fn watch_input(command: Vec<String>, device: Arc<LinuxDevice>, events: AppEvents
             let mut signal: Option<bool> = None;
             let mut seen_non_absent = false;
             loop {
-                let child = std::process::Command::new(program)
+                // The watcher runs until it is killed. Started directly, it
+                // outlived every launcher that was killed or crashed and kept
+                // polling: 128 of them after an afternoon of restarts made the
+                // launcher miss frames. util-linux `setpriv --pdeathsig` has
+                // the kernel end it when this thread (which lives as long as
+                // the launcher) goes.
+                let mut command = if Path::new(SETPRIV).exists() {
+                    let mut command = std::process::Command::new(SETPRIV);
+                    command.args(["--pdeathsig", "TERM", "--"]).arg(program);
+                    command
+                } else {
+                    std::process::Command::new(program)
+                };
+                let child = command
                     .args(args)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::piped())

@@ -57,6 +57,8 @@ use generated::{
 mod corners_view;
 mod device_view;
 mod faces_view;
+#[cfg(feature = "skins")]
+mod one_window;
 mod remote_view;
 mod settings_view;
 
@@ -422,8 +424,8 @@ pub fn run(platform: impl Platform + 'static, options: RunOptions) -> Result<(),
     let (window, controller) = start(platform, options, real_clock())?;
     #[cfg(feature = "skins")]
     if controller.borrow().skin_visible {
-        // The programmable skin window is already shown and fullscreen; keep
-        // `HomeWindow` hidden so Wayland only sees the active Pro skin.
+        // The skin is already up and fullscreen in `HomeWindow`'s window
+        // (`one_window`).
         return slint::run_event_loop().map_err(ui_error);
     }
     let _ = controller;
@@ -992,22 +994,30 @@ fn pause_when_covered(window: &HomeWindow, controller: &Rc<RefCell<Controller>>)
             return EventResult::PreventDefault;
         }
         if let WindowEvent::Focused(focused) = *event {
-            let weak = weak.clone();
-            // Not from inside the event filter: the controller may be borrowed.
-            Timer::single_shot(Duration::ZERO, move || {
-                let Some(controller) = weak.upgrade() else {
-                    return;
-                };
-                let mut this = controller.borrow_mut();
-                if !focused && this.home.state() == State::Launching {
-                    this.away = true;
-                    this.input(Input::Paused);
-                } else if focused && this.away {
-                    this.resume();
-                }
-            });
+            launcher_focus_changed(weak.clone(), focused);
         }
         EventResult::Propagate
+    });
+}
+
+/// A launcher window (Home or a programmable skin's) gained or lost the
+/// keyboard: losing it while an app launches means the app's window took
+/// over (the launch ends, RustTV is away); getting it back after that is a
+/// return to RustTV.
+#[cfg(feature = "linux")]
+fn launcher_focus_changed(weak: Weak<RefCell<Controller>>, focused: bool) {
+    // Not from inside an event filter: the controller may be borrowed.
+    Timer::single_shot(Duration::ZERO, move || {
+        let Some(controller) = weak.upgrade() else {
+            return;
+        };
+        let mut this = controller.borrow_mut();
+        if !focused && this.home.state() == State::Launching {
+            this.away = true;
+            this.input(Input::Paused);
+        } else if focused && this.away {
+            this.resume();
+        }
     });
 }
 
@@ -1229,6 +1239,10 @@ struct Controller {
     /// Whether `active_skin`'s window is currently shown (only while on plain Home).
     #[cfg(feature = "skins")]
     skin_visible: bool,
+    /// `HomeWindow`'s and the skin's item trees, which share its window
+    /// (`one_window`); set while a skin is active.
+    #[cfg(feature = "skins")]
+    skin_trees: Option<one_window::Trees>,
     /// Last focused index pushed into `active_skin` (so `on_focus` fires once per change).
     #[cfg(feature = "skins")]
     skin_last_focus: Option<i32>,
@@ -1434,6 +1448,8 @@ impl Controller {
                 active_skin: None,
                 #[cfg(feature = "skins")]
                 skin_visible: false,
+                #[cfg(feature = "skins")]
+                skin_trees: None,
                 #[cfg(feature = "skins")]
                 skin_last_focus: None,
                 #[cfg(feature = "skins")]
@@ -2055,14 +2071,29 @@ impl Controller {
                 .as_deref()
                 .and_then(std::path::Path::parent)
                 .map(|dir| dir.join("skin-prefs"));
-            match crate::skin_runtime::SkinInstance::load_with_prefs(
+            // The skin draws into `HomeWindow`'s window (`one_window`).
+            let home_window = self.window.upgrade();
+            let home_tree = self
+                .skin_trees
+                .as_ref()
+                .map(|trees| trees.home().clone())
+                .or_else(|| home_window.as_ref().map(one_window::Trees::current));
+            match crate::skin_runtime::SkinInstance::load_into_window(
                 &manifest,
                 prefs_dir.as_deref(),
+                home_window.as_ref().map(|window| window.window()),
             ) {
                 Ok(skin) => {
-                    if let Some(prev) = self.active_skin.take() {
-                        let _ = prev.hide();
+                    // Loading made the skin's tree the window's; `HomeWindow`'s
+                    // shows until `sync_active_skin` decides.
+                    let skin_tree = home_window.as_ref().map(one_window::Trees::current);
+                    if let (Some(window), Some(home)) = (&home_window, &home_tree) {
+                        one_window::show_home_tree(window, home);
                     }
+                    self.skin_trees = home_tree
+                        .zip(skin_tree)
+                        .map(|(home, skin)| one_window::Trees::new(home, skin));
+                    drop(self.active_skin.take());
                     self.skin_visible = false;
                     self.skin_last_focus = None;
                     self.skin_tiles_sig.clear();
@@ -2094,6 +2125,20 @@ impl Controller {
                             c.borrow_mut().list_pointer(0, idx, 1);
                         }
                     });
+                    let me_quick_click = self.me.clone();
+                    let me_quick_hover = self.me.clone();
+                    skin.set_quick_callbacks(
+                        move |idx| {
+                            if let Some(c) = me_quick_click.upgrade() {
+                                c.borrow_mut().quick_clicked(idx);
+                            }
+                        },
+                        move |idx| {
+                            if let Some(c) = me_quick_hover.upgrade() {
+                                c.borrow_mut().quick_hovered(idx);
+                            }
+                        },
+                    );
                     self.active_skin = Some(skin);
                     if let Some(dir) = self
                         .options
@@ -2119,14 +2164,12 @@ impl Controller {
         };
         #[cfg(feature = "skins")]
         if let Some(prev) = self.active_skin.take() {
-            if self.skin_visible {
-                if let Some(window) = self.window.upgrade() {
-                    window.window().set_fullscreen(true);
-                    let _ = window.show();
-                }
-                let _ = prev.hide();
-                self.skin_visible = false;
+            // Back to `HomeWindow`'s own tree before the skin's goes.
+            if let (Some(trees), Some(window)) = (self.skin_trees.take(), self.window.upgrade()) {
+                trees.show_home(&window);
             }
+            drop(prev);
+            self.skin_visible = false;
             self.skin_last_focus = None;
         }
         let bg_changed = spec.colors.bg != self.active_theme.colors.bg;
@@ -2164,9 +2207,13 @@ impl Controller {
 
     #[cfg(feature = "skins")]
     fn skin_key(&mut self, text: &str, pressed: bool, repeat: bool) -> bool {
-        // While the in-skin long-press context menu is open, route Up/Down/OK/Back
-        // directly to Home's menu state machine instead of the skin's dock handler.
-        if self.home.state() == State::Menu {
+        // While the in-skin long-press context menu or the top-right menu has
+        // focus, route keys directly to Home's state machine instead of the
+        // skin's grid handler.
+        if matches!(
+            self.home.state(),
+            State::Menu | State::Bar | State::Launching
+        ) {
             return self.key(text, pressed, repeat);
         }
         let key_name = match text {
@@ -2347,12 +2394,16 @@ impl Controller {
         // an external app is in front, so pressing Home or long-pressing an app
         // never flashes the stock `HomeWindow`. Only swap to `HomeWindow` for
         // full-screen built-in pages (Settings, Folder, Hidden apps, About, Remote).
+        // The skin also stays up while an app launches: its window's focus
+        // ends the launch (`pause_when_covered`, the shared window's hook), and it draws its own
+        // launch feedback from `RustTV.mode`.
         let should_show = matches!(
             self.home.state(),
-            State::Browse | State::Bar | State::Moving | State::Menu
+            State::Browse | State::Bar | State::Moving | State::Menu | State::Launching
         );
         let reduced_effects = self.reduced_effects;
         let home_win = self.window.upgrade();
+        let mut swapped = false;
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
             if let Some(tiles) = &skin_tiles {
                 skin.set_tiles(tiles);
@@ -2362,6 +2413,25 @@ impl Controller {
             }
             skin.set_reduced_effects(reduced_effects);
             skin.set_menu(menu_open, &menu_title, &menu_items, menu_selected);
+            // The top-right menu's entries (quick.slint codes) and focus;
+            // the skin draws them. Only the video input has a label (its name).
+            let input_label = home_win
+                .as_ref()
+                .map(|w| w.get_input_label().to_string())
+                .unwrap_or_default();
+            let quick: Vec<(i32, &str)> = self
+                .quick_codes
+                .iter()
+                .map(|code| (code, if code == 8 { input_label.as_str() } else { "" }))
+                .collect();
+            let quick_selected = self
+                .home
+                .quick_selected()
+                .map_or(-1, |s| i32::try_from(s).unwrap_or(i32::MAX));
+            skin.set_quick_bar(&quick, quick_selected);
+            if let Some(window) = &home_win {
+                skin.set_mode(window.get_mode());
+            }
             let focus_label = if let Some((label, color, image)) = focused_hero {
                 skin.set_hero(&label, color, image);
                 label
@@ -2374,24 +2444,25 @@ impl Controller {
             } else {
                 Vec::new()
             };
+            // One window, two trees (`one_window`): no window comes or goes.
             if should_show && !self.skin_visible {
-                let _ = skin.show();
-                if let Some(window) = &home_win {
-                    let _ = window.hide();
-                }
                 self.skin_visible = true;
+                swapped = true;
             } else if !should_show && self.skin_visible {
-                if let Some(window) = &home_win {
-                    window.window().set_fullscreen(true);
-                    let _ = window.show();
-                }
-                let _ = skin.hide();
                 self.skin_visible = false;
+                swapped = true;
             }
             cmds
         } else {
             Vec::new()
         };
+        if swapped && let (Some(trees), Some(window)) = (&self.skin_trees, &home_win) {
+            if self.skin_visible {
+                trees.show_skin(window);
+            } else {
+                trees.show_home(window);
+            }
+        }
         self.run_skin_commands(cmds);
     }
 
