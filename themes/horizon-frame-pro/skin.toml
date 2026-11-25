@@ -1,10 +1,6 @@
-# Standalone Level 3 Programmable Skin — Horizon Frame Pro.
-# Pixel-accurate photographic glass-dock & vertical photo-list launcher skin.
-
-id = "horizon-frame-pro"
+schema_version = 2
 name = "Horizon Frame Pro"
-description = "Photographic glass dock with optical pre-baked frost, sliding focus plate, quiet top-right utilities, and vertical list mode"
 author = "RustTV"
-version = "1.0"
+description = "Photographic glass dock with optical pre-baked frost, sliding focus plate, quiet top-right utilities, and vertical list mode"
 entry = "skin.slint"
 script = "skin.rhai"
