@@ -2173,7 +2173,16 @@ impl Controller {
         for cmd in cmds {
             match cmd {
                 HostCommand::Launch(index) => self.tile_pointer(false, index, 1),
-                HostCommand::Focus(index) => self.tile_pointer(false, index, 0),
+                HostCommand::Focus(index) => {
+                    if let Some(tile) = usize::try_from(index)
+                        .ok()
+                        .and_then(|i| self.home.tiles().get(i))
+                        .cloned()
+                        && self.home.hover(&tile)
+                    {
+                        self.render();
+                    }
+                }
                 HostCommand::OpenSettings => {
                     if self.home.open_settings().is_some() {
                         self.open_settings();
