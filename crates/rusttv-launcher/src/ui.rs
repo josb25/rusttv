@@ -2318,7 +2318,10 @@ impl Controller {
         // front, so pressing Home always returns to the active Pro skin rather
         // than the stock `HomeWindow`. Only swap back to `HomeWindow` for
         // built-in overlays (Settings, Folder, Hidden apps, Menu, etc.).
-        let should_show = matches!(self.home.state(), State::Browse | State::Bar);
+        let should_show = matches!(
+            self.home.state(),
+            State::Browse | State::Bar | State::Moving
+        );
         let home_win = self.window.upgrade();
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
             if let Some(tiles) = &skin_tiles {

@@ -44,10 +44,14 @@ const MAX_SCRIPT_STRING: usize = 4096;
 /// Maximum Rhai array/map entries.
 const MAX_SCRIPT_COLLECTION: usize = 256;
 
-/// Number of string / int / float reactive state slots shared between Rhai and Slint.
+/// Number of string / int / float / image reactive state slots shared between Rhai and Slint.
 pub const STR_SLOTS: usize = 8;
 pub const INT_SLOTS: usize = 8;
 pub const FLOAT_SLOTS: usize = 4;
+pub const IMG_SLOTS: usize = 4;
+
+/// Maximum number of in-memory image handles a skin script may hold at once.
+const MAX_SCRIPT_IMAGES: usize = 128;
 
 /// Virtual `@rusttv/skin.slint` module imported by programmable skins.
 pub const SKIN_API_SLINT: &str = r#"
@@ -103,6 +107,10 @@ export global RustTV {
     in-out property <float> f1: 0.0;
     in-out property <float> f2: 0.0;
     in-out property <float> f3: 0.0;
+    in-out property <image> img0;
+    in-out property <image> img1;
+    in-out property <image> img2;
+    in-out property <image> img3;
 
     // Callbacks from skin UI -> Rhai script and RustTV host.
     callback key(string, bool, bool) -> bool;
@@ -172,14 +180,215 @@ struct ScriptBridge {
     strings: [String; STR_SLOTS],
     ints: [i32; INT_SLOTS],
     floats: [f32; FLOAT_SLOTS],
+    img_slots: [slint::Image; IMG_SLOTS],
     dirty_str: [bool; STR_SLOTS],
     dirty_int: [bool; INT_SLOTS],
     dirty_float: [bool; FLOAT_SLOTS],
+    dirty_img: [bool; IMG_SLOTS],
     tile_ids: Vec<String>,
     tile_labels: Vec<String>,
+    tile_images: Vec<slint::Image>,
+    tile_overrides: HashMap<usize, slint::Image>,
+    image_pool: Vec<slint::Image>,
+    skin_dir: PathBuf,
     commands: Vec<HostCommand>,
     prefs: BTreeMap<String, String>,
     prefs_path: Option<PathBuf>,
+}
+
+fn parse_hex_rgb(hex: &str) -> (u8, u8, u8) {
+    let s = hex.trim().trim_start_matches('#');
+    if s.len() >= 6
+        && let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&s[0..2], 16),
+            u8::from_str_radix(&s[2..4], 16),
+            u8::from_str_radix(&s[4..6], 16),
+        )
+    {
+        return (r, g, b);
+    }
+    (244, 244, 241)
+}
+
+fn tint_image(src: &slint::Image, rgb: (u8, u8, u8), strength: f32) -> slint::Image {
+    let Some(rgba) = src.to_rgba8() else {
+        return src.clone();
+    };
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return src.clone();
+    }
+    let t = strength.clamp(0.0, 1.0);
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+    for (s, d) in rgba.as_slice().iter().zip(out.make_mut_slice().iter_mut()) {
+        *d = Rgba8Pixel {
+            r: (f32::from(s.r) * (1.0 - t) + f32::from(rgb.0) * t).round() as u8,
+            g: (f32::from(s.g) * (1.0 - t) + f32::from(rgb.1) * t).round() as u8,
+            b: (f32::from(s.b) * (1.0 - t) + f32::from(rgb.2) * t).round() as u8,
+            a: s.a,
+        };
+    }
+    slint::Image::from_rgba8(out)
+}
+
+fn desaturate_image(src: &slint::Image, amount: f32) -> slint::Image {
+    let Some(rgba) = src.to_rgba8() else {
+        return src.clone();
+    };
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return src.clone();
+    }
+    let t = amount.clamp(0.0, 1.0);
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+    for (s, d) in rgba.as_slice().iter().zip(out.make_mut_slice().iter_mut()) {
+        let luma = f32::from(s.r) * 0.299 + f32::from(s.g) * 0.587 + f32::from(s.b) * 0.114;
+        *d = Rgba8Pixel {
+            r: (f32::from(s.r) * (1.0 - t) + luma * t).round() as u8,
+            g: (f32::from(s.g) * (1.0 - t) + luma * t).round() as u8,
+            b: (f32::from(s.b) * (1.0 - t) + luma * t).round() as u8,
+            a: s.a,
+        };
+    }
+    slint::Image::from_rgba8(out)
+}
+
+fn blur_image(src: &slint::Image, radius: i64) -> slint::Image {
+    let Some(rgba) = src.to_rgba8() else {
+        return src.clone();
+    };
+    let (sw, sh) = (rgba.width() as usize, rgba.height() as usize);
+    if sw == 0 || sh == 0 {
+        return src.clone();
+    }
+    // Downscale wide backdrops to <= 480px so 3-pass blur is instant on Mali-G31.
+    let (w, h) = if sw > 480 {
+        (480, (sh * 480 / sw).max(1))
+    } else {
+        (sw, sh)
+    };
+    let sp = rgba.as_slice();
+    let mut buf = vec![[0u8; 4]; w * h];
+    for y in 0..h {
+        let sy = (y * sh / h).min(sh - 1);
+        for x in 0..w {
+            let sx = (x * sw / w).min(sw - 1);
+            let p = sp[sy * sw + sx];
+            buf[y * w + x] = [p.r, p.g, p.b, p.a];
+        }
+    }
+    let r = radius.clamp(1, 24) as usize;
+    let mut tmp = vec![[0u8; 4]; w * h];
+    for _ in 0..3 {
+        // Horizontal pass
+        for y in 0..h {
+            for x in 0..w {
+                let x0 = x.saturating_sub(r);
+                let x1 = (x + r).min(w - 1);
+                let count = (x1 - x0 + 1) as u32;
+                let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 0u32);
+                for xi in x0..=x1 {
+                    let p = buf[y * w + xi];
+                    sr += u32::from(p[0]);
+                    sg += u32::from(p[1]);
+                    sb += u32::from(p[2]);
+                    sa += u32::from(p[3]);
+                }
+                tmp[y * w + x] = [
+                    (sr / count) as u8,
+                    (sg / count) as u8,
+                    (sb / count) as u8,
+                    (sa / count) as u8,
+                ];
+            }
+        }
+        // Vertical pass
+        for x in 0..w {
+            for y in 0..h {
+                let y0 = y.saturating_sub(r);
+                let y1 = (y + r).min(h - 1);
+                let count = (y1 - y0 + 1) as u32;
+                let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 0u32);
+                for yi in y0..=y1 {
+                    let p = tmp[yi * w + x];
+                    sr += u32::from(p[0]);
+                    sg += u32::from(p[1]);
+                    sb += u32::from(p[2]);
+                    sa += u32::from(p[3]);
+                }
+                buf[y * w + x] = [
+                    (sr / count) as u8,
+                    (sg / count) as u8,
+                    (sb / count) as u8,
+                    (sa / count) as u8,
+                ];
+            }
+        }
+    }
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
+    for (s, d) in buf.iter().zip(out.make_mut_slice().iter_mut()) {
+        *d = Rgba8Pixel {
+            r: s[0],
+            g: s[1],
+            b: s[2],
+            a: s[3],
+        };
+    }
+    slint::Image::from_rgba8(out)
+}
+
+/// Crops `(x, y, w, h)` in 1920x1080 coordinates and applies horizontal left/right
+/// alpha edge-fades (`fade_l`, `fade_r` in 1920px units, `0.0` = no fade).
+fn crop_fade_image(
+    src: &slint::Image,
+    nx: f32,
+    ny: f32,
+    nw: f32,
+    nh: f32,
+    fade_l: f32,
+    fade_r: f32,
+) -> slint::Image {
+    let Some(rgba) = src.to_rgba8() else {
+        return src.clone();
+    };
+    let (sw, sh) = (rgba.width() as usize, rgba.height() as usize);
+    if sw == 0 || sh == 0 {
+        return src.clone();
+    }
+    let x0 = ((nx / 1920.0).clamp(0.0, 1.0) * sw as f32).round() as usize;
+    let y0 = ((ny / 1080.0).clamp(0.0, 1.0) * sh as f32).round() as usize;
+    let cw = (((nw / 1920.0).clamp(0.0, 1.0) * sw as f32).round() as usize)
+        .max(1)
+        .min(sw.saturating_sub(x0).max(1));
+    let ch = (((nh / 1080.0).clamp(0.0, 1.0) * sh as f32).round() as usize)
+        .max(1)
+        .min(sh.saturating_sub(y0).max(1));
+    let fl_px = ((fade_l / 1920.0).max(0.0) * sw as f32).max(0.0);
+    let fr_px = ((fade_r / 1920.0).max(0.0) * sw as f32).max(0.0);
+    let sp = rgba.as_slice();
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(cw as u32, ch as u32);
+    let dst = out.make_mut_slice();
+    for y in 0..ch {
+        let sy = (y0 + y).min(sh - 1);
+        for x in 0..cw {
+            let sx = (x0 + x).min(sw - 1);
+            let p = sp[sy * sw + sx];
+            let mut mult = 1.0_f32;
+            if fl_px > 0.5 && (x as f32) < fl_px {
+                mult *= (1.0 - (x as f32 / fl_px)).powf(1.25) * 0.85;
+            }
+            if fr_px > 0.5 && ((cw - 1 - x) as f32) < fr_px {
+                mult *= (1.0 - ((cw - 1 - x) as f32 / fr_px)).powf(1.25) * 0.85;
+            }
+            dst[y * cw + x] = Rgba8Pixel {
+                r: p.r,
+                g: p.g,
+                b: p.b,
+                a: (f32::from(p.a) * mult).round().clamp(0.0, 255.0) as u8,
+            };
+        }
+    }
+    slint::Image::from_rgba8(out)
 }
 
 const MAX_PREFS_ENTRIES: usize = 64;
@@ -237,6 +446,14 @@ fn save_prefs_file(path: &Path, prefs: &BTreeMap<String, String>) {
 /// 3. Simple transparent glyphs with no distinct backing keep their exact alpha
 ///    at 100% warm white.
 fn make_mono_image(src: &slint::Image) -> slint::Image {
+    extract_glyph_image(src, 0.22, (244, 244, 241))
+}
+
+fn extract_glyph_image(
+    src: &slint::Image,
+    badge_backing_alpha: f32,
+    fg: (u8, u8, u8),
+) -> slint::Image {
     let Some(rgba) = src.to_rgba8() else {
         return src.clone();
     };
@@ -340,14 +557,18 @@ fn make_mono_image(src: &slint::Image) -> slint::Image {
     let dst = out.make_mut_slice();
 
     if let (true, Some((br, bg_g, bb))) = (is_badge, bg) {
-        // Soft frosted-glass backing alpha (0.0 for white square cards, 0.22 for coloured badges).
-        let backing_alpha = if bg_is_light_card { 0.0_f32 } else { 0.22_f32 };
+        // Soft frosted-glass backing alpha (0.0 for white square cards, skin-chosen for coloured badges).
+        let backing_alpha = if bg_is_light_card {
+            0.0_f32
+        } else {
+            badge_backing_alpha.clamp(0.0, 1.0)
+        };
         for (s, d) in pixels.iter().zip(dst.iter_mut()) {
             if s.a == 0 {
                 *d = Rgba8Pixel {
-                    r: 244,
-                    g: 244,
-                    b: 241,
+                    r: fg.0,
+                    g: fg.1,
+                    b: fg.2,
                     a: 0,
                 };
                 continue;
@@ -361,19 +582,19 @@ fn make_mono_image(src: &slint::Image) -> slint::Image {
             let weight = backing_alpha + (1.0 - backing_alpha) * fg_t;
             let a = (f32::from(s.a) * weight).round().clamp(0.0, 255.0) as u8;
             *d = Rgba8Pixel {
-                r: 244,
-                g: 244,
-                b: 241,
+                r: fg.0,
+                g: fg.1,
+                b: fg.2,
                 a,
             };
         }
     } else {
-        // Pure transparent-background glyph (or uniform icon): crisp warm white.
+        // Pure transparent-background glyph (or uniform icon): crisp foreground colour.
         for (s, d) in pixels.iter().zip(dst.iter_mut()) {
             *d = Rgba8Pixel {
-                r: 244,
-                g: 244,
-                b: 241,
+                r: fg.0,
+                g: fg.1,
+                b: fg.2,
                 a: s.a,
             };
         }
@@ -390,7 +611,11 @@ struct SkinScript {
 }
 
 impl SkinScript {
-    fn compile(source: &str, prefs_path: Option<PathBuf>) -> Result<Self, String> {
+    fn compile(
+        source: &str,
+        skin_dir: PathBuf,
+        prefs_path: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let mut engine = rhai::Engine::new();
         engine.set_max_operations(MAX_SCRIPT_OPS);
         engine.set_max_call_levels(MAX_SCRIPT_CALL_DEPTH);
@@ -405,6 +630,7 @@ impl SkinScript {
             .map(load_prefs_file)
             .unwrap_or_default();
         let bridge = Rc::new(RefCell::new(ScriptBridge {
+            skin_dir,
             prefs: initial_prefs,
             prefs_path,
             ..ScriptBridge::default()
@@ -563,6 +789,154 @@ impl SkinScript {
                     .unwrap_or_else(|| fallback.to_owned())
             });
         }
+        // Composable skin-owned image pipeline primitives (native-speed, handle-based).
+        fn push_image(st: &mut ScriptBridge, img: slint::Image) -> i64 {
+            if st.image_pool.len() >= MAX_SCRIPT_IMAGES {
+                return 0;
+            }
+            st.image_pool.push(img);
+            i64::try_from(st.image_pool.len()).unwrap_or(0)
+        }
+        fn get_image(st: &ScriptBridge, handle: i64) -> Option<slint::Image> {
+            let idx = usize::try_from(handle).ok()?.checked_sub(1)?;
+            st.image_pool.get(idx).cloned()
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("tile_image", move |index: i64| -> i64 {
+                let mut st = b.borrow_mut();
+                let Some(img) = usize::try_from(index)
+                    .ok()
+                    .and_then(|i| st.tile_images.get(i).cloned())
+                else {
+                    return 0;
+                };
+                if img.size().width == 0 {
+                    return 0;
+                }
+                push_image(&mut st, img)
+            });
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("load_image", move |rel_path: &str| -> i64 {
+                let mut st = b.borrow_mut();
+                let Ok(root) = fs::canonicalize(&st.skin_dir) else {
+                    return 0;
+                };
+                let Ok(file) = fs::canonicalize(st.skin_dir.join(rel_path)) else {
+                    return 0;
+                };
+                if !file.starts_with(&root) || !file.is_file() {
+                    return 0;
+                }
+                let Ok(img) = slint::Image::load_from_path(&file) else {
+                    return 0;
+                };
+                push_image(&mut st, img)
+            });
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn(
+                "img_extract_glyph",
+                move |handle: i64, backing_alpha: f64, fg_hex: &str| -> i64 {
+                    let mut st = b.borrow_mut();
+                    let Some(src) = get_image(&st, handle) else {
+                        return 0;
+                    };
+                    let out =
+                        extract_glyph_image(&src, backing_alpha as f32, parse_hex_rgb(fg_hex));
+                    push_image(&mut st, out)
+                },
+            );
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn(
+                "img_tint",
+                move |handle: i64, hex: &str, strength: f64| -> i64 {
+                    let mut st = b.borrow_mut();
+                    let Some(src) = get_image(&st, handle) else {
+                        return 0;
+                    };
+                    let out = tint_image(&src, parse_hex_rgb(hex), strength as f32);
+                    push_image(&mut st, out)
+                },
+            );
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("img_desaturate", move |handle: i64, amount: f64| -> i64 {
+                let mut st = b.borrow_mut();
+                let Some(src) = get_image(&st, handle) else {
+                    return 0;
+                };
+                let out = desaturate_image(&src, amount as f32);
+                push_image(&mut st, out)
+            });
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("img_blur", move |handle: i64, radius: i64| -> i64 {
+                let mut st = b.borrow_mut();
+                let Some(src) = get_image(&st, handle) else {
+                    return 0;
+                };
+                let out = blur_image(&src, radius);
+                push_image(&mut st, out)
+            });
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn(
+                "img_crop_fade",
+                move |handle: i64,
+                      x: f64,
+                      y: f64,
+                      w: f64,
+                      h: f64,
+                      fade_l: f64,
+                      fade_r: f64|
+                      -> i64 {
+                    let mut st = b.borrow_mut();
+                    let Some(src) = get_image(&st, handle) else {
+                        return 0;
+                    };
+                    let out = crop_fade_image(
+                        &src,
+                        x as f32,
+                        y as f32,
+                        w as f32,
+                        h as f32,
+                        fade_l as f32,
+                        fade_r as f32,
+                    );
+                    push_image(&mut st, out)
+                },
+            );
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("set_tile_image", move |index: i64, handle: i64| {
+                let mut st = b.borrow_mut();
+                if let (Ok(idx), Some(img)) = (usize::try_from(index), get_image(&st, handle)) {
+                    st.tile_overrides.insert(idx, img);
+                }
+            });
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("set_img_slot", move |slot: i64, handle: i64| {
+                let mut st = b.borrow_mut();
+                if let (Ok(idx), Some(img)) = (usize::try_from(slot), get_image(&st, handle))
+                    && idx < IMG_SLOTS
+                {
+                    st.img_slots[idx] = img;
+                    st.dirty_img[idx] = true;
+                }
+            });
+        }
         engine.register_fn("log", |msg: &str| {
             log::info!("skin script: {msg}");
         });
@@ -707,7 +1081,7 @@ impl SkinInstance {
         let mut script = match &manifest.script_path {
             Some(path) => {
                 let src = read_capped(path, MAX_SOURCE_BYTES)?;
-                Some(SkinScript::compile(&src, prefs_path)?)
+                Some(SkinScript::compile(&src, manifest.dir.clone(), prefs_path)?)
             }
             None => None,
         };
@@ -783,17 +1157,30 @@ impl SkinInstance {
         resolved
     }
 
-    /// Pushes the live tile list into `RustTV.tiles` and the Rhai script bridge.
-    pub fn set_tiles(&self, tiles: &[SkinTileData]) {
-        if let Some(script) = &self.script {
-            let mut b = script.bridge.borrow_mut();
-            b.tile_ids = tiles.iter().map(|t| t.id.clone()).collect();
-            b.tile_labels = tiles.iter().map(|t| t.label.clone()).collect();
+    /// Pushes the live tile list into `RustTV.tiles` and invokes `on_tiles_loaded()`
+    /// in Rhai so the skin can run its own image transforms (`img_extract_glyph`,
+    /// `img_tint`, `set_tile_image`, etc.).
+    pub fn set_tiles(&mut self, tiles: &[SkinTileData]) {
+        let mut overrides = HashMap::new();
+        if let Some(script) = self.script.as_mut() {
+            {
+                let mut b = script.bridge.borrow_mut();
+                b.tile_ids = tiles.iter().map(|t| t.id.clone()).collect();
+                b.tile_labels = tiles.iter().map(|t| t.label.clone()).collect();
+                b.tile_images = tiles.iter().map(|t| t.image.clone()).collect();
+                b.tile_overrides.clear();
+                b.image_pool.clear();
+            }
+            script.call_void("on_tiles_loaded", ());
+            overrides = std::mem::take(&mut script.bridge.borrow_mut().tile_overrides);
         }
         let rows: Vec<InterpValue> = tiles
             .iter()
-            .map(|t| {
-                let mono = self.mono_image_for(t);
+            .enumerate()
+            .map(|(i, t)| {
+                let mono = overrides
+                    .remove(&i)
+                    .unwrap_or_else(|| self.mono_image_for(t));
                 let mut s = InterpStruct::default();
                 s.set_field("id".into(), InterpValue::String(t.id.as_str().into()));
                 s.set_field("label".into(), InterpValue::String(t.label.as_str().into()));
@@ -812,6 +1199,7 @@ impl SkinInstance {
         let _ = self
             .instance
             .set_global_property("RustTV", "tiles", InterpValue::Model(model));
+        self.sync_script_slots();
     }
 
     /// Updates focused tile index and invokes `on_focus(index, id, label)` in Rhai.
@@ -1022,6 +1410,16 @@ impl SkinInstance {
                     "RustTV",
                     &prop,
                     InterpValue::Number(f64::from(b.floats[idx])),
+                );
+            }
+        }
+        for idx in 0..IMG_SLOTS {
+            if std::mem::take(&mut b.dirty_img[idx]) {
+                let prop = format!("img{idx}");
+                let _ = self.instance.set_global_property(
+                    "RustTV",
+                    &prop,
+                    InterpValue::Image(b.img_slots[idx].clone()),
                 );
             }
         }

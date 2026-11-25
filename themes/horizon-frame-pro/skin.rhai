@@ -58,6 +58,23 @@ fn on_init() {
     set_str(0, "Settings");
 }
 
+fn on_tiles_loaded() {
+    // Skin-owned icon pipeline: extract crisp warm-white glyphs with 22% frosted
+    // badge silhouettes directly in Rhai (no Rust changes needed to tweak style).
+    let n = tile_count();
+    let i = 0;
+    while i < n {
+        let src = tile_image(i);
+        if src > 0 {
+            let styled = img_extract_glyph(src, 0.22, "#F4F4F1");
+            if styled > 0 {
+                set_tile_image(i, styled);
+            }
+        }
+        i += 1;
+    }
+}
+
 fn on_focus(index, id, label) {
     set_int(3, index);
     sync_scroll(index, get_int(0));
