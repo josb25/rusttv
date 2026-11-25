@@ -199,9 +199,16 @@ impl Controller {
             crate::i18n::uses_24_hours(self.options.language.as_deref().unwrap_or_default())
         });
         if let Some(window) = self.window.upgrade() {
-            window.set_clock_text(clock_text(local, twenty_four).into());
-            window.set_greeting_text(greeting_text(local).into());
-            window.set_date_text(date_text(local).into());
+            let clk = clock_text(local, twenty_four);
+            let greet = greeting_text(local);
+            let date = date_text(local);
+            window.set_clock_text(clk.as_str().into());
+            window.set_greeting_text(greet.into());
+            window.set_date_text(date.as_str().into());
+            #[cfg(feature = "skins")]
+            if let Some(skin) = &self.active_skin {
+                skin.set_clock(&clk, greet, &date);
+            }
             if self.faces.ambient {
                 self.faces.drift = (self.faces.drift + 1) % 25;
                 window.set_ambient_drift(self.faces.drift);

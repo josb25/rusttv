@@ -133,7 +133,7 @@ impl Controller {
     pub(super) fn open_settings(&mut self) {
         self.reload_themes();
         let themes = self.theme_options();
-        let active = self.active_theme.id.clone();
+        let active = self.active_theme_id().to_owned();
         self.settings = Some(
             // About is a section of Settings, not a tile (PANELS.md § 6).
             SettingsPage::new(Overview::default(), self.options.right_to_left)

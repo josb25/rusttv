@@ -1,0 +1,217 @@
+// Level 3 programmable skin: Google TV replica (.slint + .rhai).
+// Rendered natively via Skia OpenGL ES at 60 fps through slint-interpreter.
+import { RustTV } from "@rusttv/skin.slint";
+
+component TabPill inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+
+    height: 44px;
+    width: txt.preferred-width + 38px;
+    border-radius: 22px;
+    background: active ? #E8EAED : transparent;
+    animate background { duration: 150ms; easing: ease-out; }
+
+    txt := Text {
+        width: parent.width;
+        height: parent.height;
+        text: label;
+        font-size: 18px;
+        font-weight: active ? 600 : 500;
+        color: active ? #121212 : #E8EAEDB8;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component SkinHome inherits Window {
+    title: "RustTV — Google TV Skin";
+    background: #0E0F12;
+    preferred-width: 1280px;
+    preferred-height: 720px;
+
+    property <length> u: min(root.width / 1920, root.height / 1080);
+
+    FocusScope {
+        key-pressed(event) => {
+            RustTV.key(event.text, true, event.repeat) ? accept : reject
+        }
+        key-released(event) => {
+            RustTV.key(event.text, false, false) ? accept : reject
+        }
+    }
+
+    // Full-bleed cinematic spotlight backdrop tinted by the focused app's colour.
+    Rectangle {
+        width: parent.width;
+        height: parent.height * 0.72;
+        background: @radial-gradient(circle, RustTV.hero-color.with-alpha(0.65) 0%, #241828 45%, #0E0F12 100%);
+    }
+    // Left + bottom Google TV legibility scrims.
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: @linear-gradient(90deg, #0E0F12E8 0%, #0E0F1278 42%, #0E0F1200 78%);
+    }
+    Rectangle {
+        y: parent.height * 0.44;
+        width: parent.width;
+        height: parent.height * 0.56;
+        background: @linear-gradient(180deg, #0E0F1200 0%, #0E0F12E8 52%, #0E0F12 100%);
+    }
+
+    // Top navigation bar: avatar + interactive Rhai-driven tabs on the left.
+    HorizontalLayout {
+        x: 64 * u;
+        y: 36 * u;
+        height: 48px;
+        spacing: 12px;
+        alignment: start;
+
+        Rectangle {
+            width: 44px;
+            height: 44px;
+            border-radius: 22px;
+            background: #FFFFFF22;
+            Path {
+                x: 11px;
+                y: 11px;
+                width: 22px;
+                height: 22px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M 12 4 A 4 4 0 1 0 12 12 A 4 4 0 1 0 12 4 Z M 4 20 A 8 7 0 0 1 20 20";
+                stroke: #F2F4F8;
+                stroke-width: 2px;
+                fill: transparent;
+            }
+        }
+        TabPill { label: "For you"; active: RustTV.i0 == 0; clicked => { RustTV.action("tab", "0"); } }
+        TabPill { label: "Movies"; active: RustTV.i0 == 1; clicked => { RustTV.action("tab", "1"); } }
+        TabPill { label: "Shows"; active: RustTV.i0 == 2; clicked => { RustTV.action("tab", "2"); } }
+        TabPill { label: "Apps"; active: RustTV.i0 == 3; clicked => { RustTV.action("tab", "3"); } }
+        TabPill { label: "Library"; active: RustTV.i0 == 4; clicked => { RustTV.action("tab", "4"); } }
+    }
+
+    // Top-right circular Settings button + clock + RustTV wordmark.
+    HorizontalLayout {
+        x: parent.width - self.preferred-width - 64 * u;
+        y: 36 * u;
+        height: 44px;
+        spacing: 14px;
+        alignment: end;
+
+        Rectangle {
+            width: 44px;
+            height: 44px;
+            border-radius: 22px;
+            background: #FFFFFF1E;
+            Path {
+                x: 11px;
+                y: 11px;
+                width: 22px;
+                height: 22px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M 19.18 9.51 L 21.77 9.86 L 21.77 14.14 L 19.18 14.49 L 18.84 15.32 L 20.42 17.39 L 17.39 20.42 L 15.32 18.84 L 14.49 19.18 L 14.14 21.77 L 9.86 21.77 L 9.51 19.18 L 8.68 18.84 L 6.61 20.42 L 3.58 17.39 L 5.16 15.32 L 4.82 14.49 L 2.23 14.14 L 2.23 9.86 L 4.82 9.51 L 5.16 8.68 L 3.58 6.61 L 6.61 3.58 L 8.68 5.16 L 9.51 4.82 L 9.86 2.23 L 14.14 2.23 L 14.49 4.82 L 15.32 5.16 L 17.39 3.58 L 20.42 6.61 L 18.84 8.68 Z M 15.2 12 A 3.2 3.2 0 1 0 8.8 12 A 3.2 3.2 0 1 0 15.2 12 Z";
+                stroke: #F2F4F8;
+                stroke-width: 1.8px;
+                fill: transparent;
+            }
+            TouchArea {
+                clicked => { RustTV.action("settings", ""); }
+            }
+        }
+        Text {
+            text: RustTV.clock-text;
+            font-size: 20px;
+            font-weight: 500;
+            color: #F2F4F8C0;
+            vertical-alignment: center;
+        }
+        Text {
+            text: "RustTV";
+            font-size: 20px;
+            font-weight: 600;
+            color: #F2F4F890;
+            vertical-alignment: center;
+        }
+    }
+
+    // Hero spotlight title + dynamic Rhai subtitle.
+    Text {
+        x: 64 * u;
+        y: 230 * u;
+        width: parent.width * 0.65;
+        text: RustTV.hero-title;
+        font-size: 64 * u;
+        font-weight: 400;
+        color: #FFFFFF;
+        overflow: elide;
+    }
+    Text {
+        x: 64 * u;
+        y: 312 * u;
+        width: parent.width * 0.65;
+        text: RustTV.s1;
+        font-size: 22 * u;
+        font-weight: 400;
+        color: #E8EAEDB8;
+        overflow: elide;
+    }
+
+    // Dynamic section heading ("Your apps", "Movie apps", etc.) from Rhai.
+    Text {
+        x: 64 * u;
+        y: parent.height - 252 * u;
+        text: RustTV.s2;
+        font-size: 22 * u;
+        font-weight: 500;
+        color: #A8B0BC;
+    }
+
+    // Circular "Your apps" row.
+    Rectangle {
+        x: 64 * u;
+        y: parent.height - 204 * u;
+        width: parent.width - 128 * u;
+        height: 168 * u;
+
+        for tile[i] in RustTV.tiles: Rectangle {
+            property <bool> is-focused: i == RustTV.focused-index;
+            property <length> base-size: 146 * u;
+            property <length> step: 174 * u;
+            property <length> sz: is-focused ? base-size * 1.10 : base-size;
+            x: i * step + (base-size - sz) / 2;
+            y: (base-size - sz) / 2;
+            width: sz;
+            height: sz;
+            border-radius: sz / 2;
+            background: tile.tint.alpha > 0 ? tile.tint : #1C1E24;
+            border-width: is-focused ? 3.5 * u : 0px;
+            border-color: #FFFFFF;
+            visible: i < 10;
+            animate width, height, x, y { duration: 150ms; easing: ease-out; }
+
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                clip: true;
+                Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: tile.image;
+                    image-fit: tile.kind == 1 ? contain : cover;
+                }
+            }
+            TouchArea {
+                clicked => { RustTV.tile-clicked(i, false); }
+            }
+        }
+    }
+}

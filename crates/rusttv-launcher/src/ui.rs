@@ -1213,6 +1213,18 @@ struct Controller {
     themes: Vec<ThemeSpec>,
     /// Currently active UI theme.
     active_theme: ThemeSpec,
+    /// Discovered Level 3 programmable `.slint` (+ optional `.rhai`) skins.
+    #[cfg(feature = "skins")]
+    skins: Vec<crate::skin_runtime::SkinManifest>,
+    /// Currently active Level 3 programmable skin instance, when a `"skin:*"` ID is selected.
+    #[cfg(feature = "skins")]
+    active_skin: Option<crate::skin_runtime::SkinInstance>,
+    /// Whether `active_skin`'s window is currently shown (only while on plain Home).
+    #[cfg(feature = "skins")]
+    skin_visible: bool,
+    /// Last focused index pushed into `active_skin` (so `on_focus` fires once per change).
+    #[cfg(feature = "skins")]
+    skin_last_focus: Option<i32>,
     /// Whether Settings → Effects is in Reduced mode (skip hero glow work).
     reduced_effects: bool,
 }
@@ -1290,7 +1302,10 @@ impl Controller {
         let ambient_off = state_dir.is_some_and(|dir| dir.join(order_file::AMBIENT_OFF).exists());
         let reduced_effects =
             state_dir.is_some_and(|dir| dir.join(order_file::REDUCED_EFFECTS).exists());
-        let themes = theme::load_all(&theme::theme_dirs(state_dir));
+        let theme_dirs = theme::theme_dirs(state_dir);
+        let themes = theme::load_all(&theme_dirs);
+        #[cfg(feature = "skins")]
+        let skins = crate::skin_runtime::discover_skins(&theme_dirs);
         let selected_id = theme::load_selected(state_dir);
         let active_theme = themes
             .iter()
@@ -1398,6 +1413,14 @@ impl Controller {
                 code_timer: Timer::default(),
                 themes,
                 active_theme,
+                #[cfg(feature = "skins")]
+                skins,
+                #[cfg(feature = "skins")]
+                active_skin: None,
+                #[cfg(feature = "skins")]
+                skin_visible: false,
+                #[cfg(feature = "skins")]
+                skin_last_focus: None,
                 reduced_effects,
             })
         });
@@ -1411,6 +1434,10 @@ impl Controller {
             // `render` schedules the hero after HERO_DELAY, so the first frame
             // does not wait for its backdrop; it fades in like any focus change.
             this.render();
+            #[cfg(feature = "skins")]
+            if selected_id.starts_with("skin:") {
+                this.select_theme(&selected_id);
+            }
             this.refresh_update();
             this.start_links();
             this.tick_clock();
@@ -1433,6 +1460,8 @@ impl Controller {
         self.refresh_update();
         self.show_history_panel();
         self.push_remote_view();
+        #[cfg(feature = "skins")]
+        self.sync_active_skin();
         self.pack_timer.stop();
         self.start_links();
         let running_changed = self.sync_running();
@@ -1952,7 +1981,12 @@ impl Controller {
             .order_file
             .as_deref()
             .and_then(std::path::Path::parent);
-        self.themes = theme::load_all(&theme::theme_dirs(state_dir));
+        let dirs = theme::theme_dirs(state_dir);
+        self.themes = theme::load_all(&dirs);
+        #[cfg(feature = "skins")]
+        {
+            self.skins = crate::skin_runtime::discover_skins(&dirs);
+        }
         if let Some(updated) = self
             .themes
             .iter()
@@ -1965,21 +1999,94 @@ impl Controller {
 
     /// Theme entries shown in Settings → Theme.
     pub(super) fn theme_options(&self) -> Vec<ThemeOption> {
-        self.themes
+        let mut opts: Vec<ThemeOption> = self
+            .themes
             .iter()
             .map(|spec| ThemeOption {
                 id: spec.id.clone(),
                 name: spec.name.clone(),
                 detail: spec.detail.clone(),
             })
-            .collect()
+            .collect();
+        #[cfg(feature = "skins")]
+        opts.extend(self.skins.iter().map(|manifest| ThemeOption {
+            id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            detail: manifest.detail.clone(),
+        }));
+        opts
     }
 
-    /// Applies and persists the selected theme immediately.
+    /// Currently active theme or programmable skin ID.
+    pub(super) fn active_theme_id(&self) -> &str {
+        #[cfg(feature = "skins")]
+        if let Some(skin) = &self.active_skin {
+            return &skin.manifest.id;
+        }
+        &self.active_theme.id
+    }
+
+    /// Applies and persists the selected theme (or Level 3 `.slint`+`.rhai` skin) immediately.
     pub(super) fn select_theme(&mut self, id: &str) {
+        #[cfg(feature = "skins")]
+        if let Some(manifest) = self.skins.iter().find(|s| s.id == id).cloned() {
+            match crate::skin_runtime::SkinInstance::load(&manifest) {
+                Ok(skin) => {
+                    if let Some(prev) = self.active_skin.take() {
+                        let _ = prev.hide();
+                    }
+                    self.skin_visible = false;
+                    self.skin_last_focus = None;
+                    let me_key = self.me.clone();
+                    let me_tile = self.me.clone();
+                    let me_action = self.me.clone();
+                    skin.set_callbacks(
+                        move |text, pressed, repeat| {
+                            me_key
+                                .upgrade()
+                                .is_some_and(|c| c.borrow_mut().skin_key(&text, pressed, repeat))
+                        },
+                        move |idx, menu| {
+                            if let Some(c) = me_tile.upgrade() {
+                                c.borrow_mut()
+                                    .tile_pointer(false, idx, if menu { 2 } else { 1 });
+                            }
+                        },
+                        move |name, arg| {
+                            if let Some(c) = me_action.upgrade() {
+                                c.borrow_mut().skin_action(&name, &arg);
+                            }
+                        },
+                    );
+                    self.active_skin = Some(skin);
+                    if let Some(dir) = self
+                        .options
+                        .order_file
+                        .as_deref()
+                        .and_then(std::path::Path::parent)
+                        && let Err(error) = theme::save_selected(dir, id)
+                    {
+                        log::warn!("saving selected skin failed: {error}");
+                    }
+                    self.sync_active_skin();
+                }
+                Err(error) => {
+                    log::warn!("loading programmable skin {id} failed: {error}");
+                    self.show_toast(format!("Skin error: {error}").into());
+                }
+            }
+            return;
+        }
+
         let Some(spec) = self.themes.iter().find(|spec| spec.id == id).cloned() else {
             return;
         };
+        #[cfg(feature = "skins")]
+        if let Some(prev) = self.active_skin.take() {
+            let _ = prev.hide();
+            self.skin_visible = false;
+            self.skin_last_focus = None;
+        }
         let bg_changed = spec.colors.bg != self.active_theme.colors.bg;
         let tint_changed = spec.colors.icon_card_tint != self.active_theme.colors.icon_card_tint
             || spec.colors.surface != self.active_theme.colors.surface;
@@ -2011,6 +2118,120 @@ impl Controller {
         }
         self.hero = None;
         self.show_hero();
+    }
+
+    #[cfg(feature = "skins")]
+    fn skin_key(&mut self, text: &str, pressed: bool, repeat: bool) -> bool {
+        let (handled, cmds) = if let Some(skin) = self.active_skin.as_mut() {
+            skin.dispatch_key(text, pressed)
+        } else {
+            (false, Vec::new())
+        };
+        self.run_skin_commands(cmds);
+        if handled {
+            return true;
+        }
+        self.key(text, pressed, repeat)
+    }
+
+    #[cfg(feature = "skins")]
+    fn skin_action(&mut self, name: &str, arg: &str) {
+        let cmds = if let Some(skin) = self.active_skin.as_mut() {
+            skin.dispatch_action(name, arg)
+        } else {
+            Vec::new()
+        };
+        self.run_skin_commands(cmds);
+    }
+
+    #[cfg(feature = "skins")]
+    fn run_skin_commands(&mut self, cmds: Vec<crate::skin_runtime::HostCommand>) {
+        use crate::skin_runtime::HostCommand;
+        for cmd in cmds {
+            match cmd {
+                HostCommand::Launch(index) => self.tile_pointer(false, index, 1),
+                HostCommand::Focus(index) => self.tile_pointer(false, index, 0),
+                HostCommand::OpenSettings => {
+                    self.open_settings();
+                    self.render();
+                }
+            }
+        }
+    }
+
+    /// Syncs live tiles, focus, clock, hero, and visibility to an active Level 3 skin.
+    #[cfg(feature = "skins")]
+    fn sync_active_skin(&mut self) {
+        if self.active_skin.is_none() {
+            return;
+        }
+        let skin_tiles: Vec<crate::skin_runtime::SkinTileData> = self
+            .home
+            .tiles()
+            .iter()
+            .map(|id| {
+                let data = self.tile_data(id);
+                crate::skin_runtime::SkinTileData {
+                    id: order_file::name_of(id),
+                    label: data.label.to_string(),
+                    image: data.image,
+                    kind: data.kind,
+                    running: data.running,
+                    tint: data.tint,
+                }
+            })
+            .collect();
+        let focus = i32::try_from(self.home.focus()).unwrap_or(0);
+        let focus_id = self
+            .home
+            .focused()
+            .map(order_file::name_of)
+            .unwrap_or_default();
+        let focus_label = skin_tiles
+            .get(usize::try_from(focus).unwrap_or(usize::MAX))
+            .map(|t| t.label.clone())
+            .unwrap_or_default();
+        let hero_image = skin_tiles
+            .get(usize::try_from(focus).unwrap_or(usize::MAX))
+            .map(|t| t.image.clone())
+            .unwrap_or_default();
+        let hero_color = skin_tiles
+            .get(usize::try_from(focus).unwrap_or(usize::MAX))
+            .map(|t| t.tint)
+            .unwrap_or_else(|| self.active_theme.colors.surface.to_slint());
+        let (clock, greeting, date) = if let Some(window) = self.window.upgrade() {
+            (
+                window.get_clock_text().to_string(),
+                window.get_greeting_text().to_string(),
+                window.get_date_text().to_string(),
+            )
+        } else {
+            (String::new(), String::new(), String::new())
+        };
+        let should_show = self.home.state() == State::Browse && !self.away;
+        let focus_changed = self.skin_last_focus != Some(focus);
+        let cmds = if let Some(skin) = self.active_skin.as_mut() {
+            skin.set_tiles(&skin_tiles);
+            skin.set_clock(&clock, &greeting, &date);
+            skin.set_hero(&focus_label, hero_color, hero_image);
+            let cmds = if focus_changed {
+                self.skin_last_focus = Some(focus);
+                skin.set_focused(focus, &focus_id, &focus_label)
+            } else {
+                Vec::new()
+            };
+            if should_show && !self.skin_visible {
+                let _ = skin.show();
+                self.skin_visible = true;
+            } else if !should_show && self.skin_visible {
+                let _ = skin.hide();
+                self.skin_visible = false;
+            }
+            cmds
+        } else {
+            Vec::new()
+        };
+        self.run_skin_commands(cmds);
     }
 
     /// Called when Settings → Effects changes `reduced_effects`.
@@ -2291,6 +2512,8 @@ impl Controller {
             self.render();
         } else if caption_changed && !self.away {
             self.push_remote_view();
+            #[cfg(feature = "skins")]
+            self.sync_active_skin();
         }
     }
 
@@ -2694,6 +2917,8 @@ impl Controller {
                 });
         }
         self.push_remote_view();
+        #[cfg(feature = "skins")]
+        self.sync_active_skin();
         self.after_render_faces();
     }
 
@@ -3018,6 +3243,8 @@ impl Controller {
             page.set_pointer(self.platform.pointer_state());
         }
         self.push_remote_view();
+        #[cfg(feature = "skins")]
+        self.sync_active_skin();
         self.render();
     }
 

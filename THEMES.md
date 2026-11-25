@@ -119,8 +119,23 @@ scrim_strength = 0.60        # 0.0..=0.90 directional contrast scrim over wallpa
 
 ## Performance & Safety Limits
 
-- **Zero per-frame overhead:** Every skinning option maps directly to GPU-cached Skia primitives, alpha rectangles, and a single decoded wallpaper bitmap (SVG wallpapers are rasterized once on theme load at 1280×720 via `resvg`). Setting `motion_scale = 0.0` and `glow_strength = 0.0` eliminates animations and glow baking completely.
+- **Zero per-frame overhead:** Every TOML skinning option maps directly to GPU-cached Skia primitives, alpha rectangles, and a single decoded wallpaper bitmap (SVG wallpapers are rasterized once on theme load at 1280×720 via `resvg`, and optical frosted-glass docks use a pre-baked Gaussian-blurred copy). Setting `motion_scale = 0.0` and `glow_strength = 0.0` eliminates animations and glow baking completely.
 - Theme `.toml` files are capped at **64 KiB**.
 - Background images must be a single `.png` or `.svg` filename inside the theme's own directory (no `..` or subdirectories), capped at **4 MiB** (and **1920×1080** for PNGs).
 - Numeric ranges are clamped to valid bounds and control / bidirectional override characters are stripped from text fields.
 - Invalid theme files are logged and skipped so RustTV always starts cleanly.
+
+## Level 3 Programmable Skins (`.slint` + Sandboxed `.rhai`)
+
+When you want **arbitrary shapes, custom layouts, custom vector `Path`s, and custom scripted behavior** (HTML + CSS + JS parity on native 60 fps Skia, enabled via the `skins` / `linux` feature), drop a folder into any `themes/` directory:
+
+```text
+themes/google-tv-pro/
+├── skin.toml      # schema_version = 2, name, author, description, entry = "skin.slint", script = "skin.rhai"
+├── skin.slint     # arbitrary Slint UI importing { RustTV } from "@rusttv/skin.slint"
+└── skin.rhai      # optional sandboxed Rhai script (on_init, on_focus, on_key, on_action, on_tick)
+```
+
+- **UI (`skin.slint`)**: Compiled at runtime by `slint-interpreter` onto the exact same Skia OpenGL ES renderer. Imports `{ RustTV, SkinTile, SkinAction } from "@rusttv/skin.slint"` for live tiles, focus, clock/greeting/date, hero data, reactive script slots (`s0..s7`, `i0..i7`, `f0..f3`), and callbacks (`key`, `tile-clicked`, `action`).
+- **Scripting (`skin.rhai`)**: Runs in a strict sandbox (50,000 op budget per hook, 16-deep call stack, 4 KiB string cap, zero filesystem/network access) with host functions `set_str`/`get_str`, `set_int`/`get_int`, `set_float`/`get_float`, `tile_count`, `tile_id`, `tile_label`, `launch`, `focus`, `open_settings`, and `log`.
+- **Example**: [`themes/google-tv-pro/`](themes/google-tv-pro/) implements an interactive Google TV replica with live Rhai-driven tabs (`For you` / `Movies` / `Shows` / `Apps` / `Library`), dynamic spotlight taglines, and circular app icons.

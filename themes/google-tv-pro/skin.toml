@@ -1,0 +1,6 @@
+schema_version = 2
+name = "Google TV (Programmable)"
+author = "RustTV"
+description = "Level 3 .slint + .rhai Google TV replica with live tabs, spotlight, and circular apps"
+entry = "skin.slint"
+script = "skin.rhai"
