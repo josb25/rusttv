@@ -15,13 +15,13 @@
 //! - optional `.svg` / `.png` assets inside the same directory.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 
 use serde::Deserialize;
-use slint::{ComponentHandle as _, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle as _, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use slint_interpreter::{
     Compiler, ComponentInstance, DiagnosticLevel, Struct as InterpStruct, Value as InterpValue,
 };
@@ -55,6 +55,7 @@ export struct SkinTile {
     id: string,
     label: string,
     image: image,
+    mono-image: image,
     kind: int,
     running: bool,
     tint: color,
@@ -177,6 +178,88 @@ struct ScriptBridge {
     tile_ids: Vec<String>,
     tile_labels: Vec<String>,
     commands: Vec<HostCommand>,
+    prefs: BTreeMap<String, String>,
+    prefs_path: Option<PathBuf>,
+}
+
+const MAX_PREFS_ENTRIES: usize = 64;
+const MAX_PREF_VALUE_LEN: usize = 256;
+
+fn is_safe_pref_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn load_prefs_file(path: &Path) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    let Ok(text) = fs::read_to_string(path) else {
+        return map;
+    };
+    for line in text.lines().take(MAX_PREFS_ENTRIES) {
+        if let Some((k, v)) = line.split_once('=')
+            && is_safe_pref_key(k)
+        {
+            map.insert(k.to_owned(), v.chars().take(MAX_PREF_VALUE_LEN).collect());
+        }
+    }
+    map
+}
+
+fn save_prefs_file(path: &Path, prefs: &BTreeMap<String, String>) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let mut out = String::new();
+    for (k, v) in prefs.iter().take(MAX_PREFS_ENTRIES) {
+        out.push_str(k);
+        out.push('=');
+        out.push_str(&v.replace(['\r', '\n'], " "));
+        out.push('\n');
+    }
+    let _ = fs::write(path, out);
+}
+
+/// Converts a launcher icon bitmap into a crisp warm-white (`#F4F4F1`) monochrome
+/// mark for minimalist glass/editorial skins. Transparent-background icons keep
+/// their exact alpha silhouette; opaque icons map luminance contrast into alpha.
+fn make_mono_image(src: &slint::Image) -> slint::Image {
+    let Some(rgba) = src.to_rgba8() else {
+        return src.clone();
+    };
+    let (w, h) = (rgba.width(), rgba.height());
+    if w == 0 || h == 0 {
+        return src.clone();
+    }
+    let pixels = rgba.as_slice();
+    let has_transparency = pixels.iter().any(|p| p.a < 240);
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+    let dst = out.make_mut_slice();
+    if has_transparency {
+        for (s, d) in pixels.iter().zip(dst.iter_mut()) {
+            *d = Rgba8Pixel {
+                r: 244,
+                g: 244,
+                b: 241,
+                a: s.a,
+            };
+        }
+    } else {
+        // Opaque tile artwork: preserve soft luminance modulation as warm-white alpha.
+        for (s, d) in pixels.iter().zip(dst.iter_mut()) {
+            let luma = (u16::from(s.r) * 77 + u16::from(s.g) * 150 + u16::from(s.b) * 29) >> 8;
+            let a = (luma as u8).max(40);
+            *d = Rgba8Pixel {
+                r: 244,
+                g: 244,
+                b: 241,
+                a,
+            };
+        }
+    }
+    slint::Image::from_rgba8(out)
 }
 
 /// Sandboxed Rhai script state for a programmable skin.
@@ -188,7 +271,7 @@ struct SkinScript {
 }
 
 impl SkinScript {
-    fn compile(source: &str) -> Result<Self, String> {
+    fn compile(source: &str, prefs_path: Option<PathBuf>) -> Result<Self, String> {
         let mut engine = rhai::Engine::new();
         engine.set_max_operations(MAX_SCRIPT_OPS);
         engine.set_max_call_levels(MAX_SCRIPT_CALL_DEPTH);
@@ -198,7 +281,15 @@ impl SkinScript {
         engine.set_max_map_size(MAX_SCRIPT_COLLECTION);
         engine.disable_symbol("eval");
 
-        let bridge = Rc::new(RefCell::new(ScriptBridge::default()));
+        let initial_prefs = prefs_path
+            .as_deref()
+            .map(load_prefs_file)
+            .unwrap_or_default();
+        let bridge = Rc::new(RefCell::new(ScriptBridge {
+            prefs: initial_prefs,
+            prefs_path,
+            ..ScriptBridge::default()
+        }));
 
         {
             let b = bridge.clone();
@@ -320,6 +411,39 @@ impl SkinScript {
                 b.borrow_mut().commands.push(HostCommand::OpenSettings);
             });
         }
+        {
+            let b = bridge.clone();
+            engine.register_fn("save_pref", move |key: &str, val: &str| {
+                if !is_safe_pref_key(key) {
+                    return;
+                }
+                let mut st = b.borrow_mut();
+                if st.prefs.len() >= MAX_PREFS_ENTRIES && !st.prefs.contains_key(key) {
+                    return;
+                }
+                let cleaned: String = val
+                    .replace(['\r', '\n'], " ")
+                    .chars()
+                    .take(MAX_PREF_VALUE_LEN)
+                    .collect();
+                if st.prefs.get(key).map(String::as_str) != Some(cleaned.as_str()) {
+                    st.prefs.insert(key.to_owned(), cleaned);
+                    if let Some(path) = st.prefs_path.clone() {
+                        save_prefs_file(&path, &st.prefs);
+                    }
+                }
+            });
+        }
+        {
+            let b = bridge.clone();
+            engine.register_fn("load_pref", move |key: &str, fallback: &str| -> String {
+                b.borrow()
+                    .prefs
+                    .get(key)
+                    .cloned()
+                    .unwrap_or_else(|| fallback.to_owned())
+            });
+        }
         engine.register_fn("log", |msg: &str| {
             log::info!("skin script: {msg}");
         });
@@ -376,11 +500,22 @@ pub struct SkinInstance {
     pub manifest: SkinManifest,
     instance: ComponentInstance,
     script: Option<SkinScript>,
+    mono_cache: RefCell<HashMap<String, slint::Image>>,
 }
 
 impl SkinInstance {
     /// Compiles and instantiates a programmable skin from its validated manifest.
+    #[cfg(test)]
     pub fn load(manifest: &SkinManifest) -> Result<Self, String> {
+        Self::load_with_prefs(manifest, None)
+    }
+
+    /// Compiles and instantiates a programmable skin with an optional directory
+    /// for persistent `save_pref`/`load_pref` storage.
+    pub fn load_with_prefs(
+        manifest: &SkinManifest,
+        prefs_dir: Option<&Path>,
+    ) -> Result<Self, String> {
         let entry_name = manifest
             .entry_path
             .file_name()
@@ -446,10 +581,14 @@ impl SkinInstance {
             .create()
             .map_err(|e| format!("failed to create SkinHome: {e}"))?;
 
+        let prefs_path = prefs_dir.map(|dir| {
+            let stem = manifest.id.strip_prefix("skin:").unwrap_or(&manifest.id);
+            dir.join(format!("{stem}.prefs"))
+        });
         let mut script = match &manifest.script_path {
             Some(path) => {
                 let src = read_capped(path, MAX_SOURCE_BYTES)?;
-                Some(SkinScript::compile(&src)?)
+                Some(SkinScript::compile(&src, prefs_path)?)
             }
             None => None,
         };
@@ -462,6 +601,7 @@ impl SkinInstance {
             manifest: manifest.clone(),
             instance,
             script,
+            mono_cache: RefCell::new(HashMap::new()),
         };
         skin.sync_script_slots();
         Ok(skin)
@@ -484,6 +624,39 @@ impl SkinInstance {
         self.instance.hide().map_err(|e| e.to_string())
     }
 
+    /// Resolves a monochrome icon for `tile`: first checks `<skin>/icons/<safe-id>.svg`
+    /// (or `.png`), then falls back to a cached warm-white silhouette of `tile.image`.
+    fn mono_image_for(&self, tile: &SkinTileData) -> slint::Image {
+        if let Some(cached) = self.mono_cache.borrow().get(&tile.id) {
+            return cached.clone();
+        }
+        let safe: String = tile
+            .id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let icons_dir = self.manifest.dir.join("icons");
+        let resolved = ["svg", "png"]
+            .into_iter()
+            .find_map(|ext| {
+                let path = icons_dir.join(format!("{safe}.{ext}"));
+                path.is_file()
+                    .then(|| slint::Image::load_from_path(&path).ok())
+                    .flatten()
+            })
+            .unwrap_or_else(|| make_mono_image(&tile.image));
+        self.mono_cache
+            .borrow_mut()
+            .insert(tile.id.clone(), resolved.clone());
+        resolved
+    }
+
     /// Pushes the live tile list into `RustTV.tiles` and the Rhai script bridge.
     pub fn set_tiles(&self, tiles: &[SkinTileData]) {
         if let Some(script) = &self.script {
@@ -494,10 +667,12 @@ impl SkinInstance {
         let rows: Vec<InterpValue> = tiles
             .iter()
             .map(|t| {
+                let mono = self.mono_image_for(t);
                 let mut s = InterpStruct::default();
                 s.set_field("id".into(), InterpValue::String(t.id.as_str().into()));
                 s.set_field("label".into(), InterpValue::String(t.label.as_str().into()));
                 s.set_field("image".into(), InterpValue::Image(t.image.clone()));
+                s.set_field("mono-image".into(), InterpValue::Image(mono));
                 s.set_field("kind".into(), InterpValue::Number(f64::from(t.kind)));
                 s.set_field("running".into(), InterpValue::Bool(t.running));
                 s.set_field(

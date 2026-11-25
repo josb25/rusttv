@@ -74,27 +74,32 @@ export component SkinHome inherits Window {
         }
     }
 
-    // 1. Full-bleed 1920x1080 coastal cliff photographic wallpaper.
-    Image {
+    // 1. Full-bleed 1920x1080 coastal cliff photographic wallpaper (GPU-cached).
+    Rectangle {
         width: parent.width;
         height: parent.height;
-        source: @image-url("cove.jpg");
-        image-fit: cover;
-    }
+        cache-rendering-hint: true;
 
-    // .scrim: bottom legibility gradient (top: 560, height: 520)
-    if mode == 0: Rectangle {
-        y: 560 * u;
-        width: parent.width;
-        height: 520 * u;
-        background: @linear-gradient(180deg, #040A0C00 0%, #040A0C6B 70%, #040A0C85 100%);
-    }
-    // .shade: top legibility gradient (top: 0, height: 300)
-    Rectangle {
-        y: 0;
-        width: parent.width;
-        height: 300 * u;
-        background: @linear-gradient(180deg, #040A0C52 0%, #040A0C24 50%, #040A0C00 100%);
+        Image {
+            width: parent.width;
+            height: parent.height;
+            source: @image-url("cove.jpg");
+            image-fit: cover;
+        }
+        // .scrim: bottom legibility gradient (top: 560, height: 520)
+        if mode == 0: Rectangle {
+            y: 560 * u;
+            width: parent.width;
+            height: 520 * u;
+            background: @linear-gradient(180deg, #040A0C00 0%, #040A0C6B 70%, #040A0C85 100%);
+        }
+        // .shade: top legibility gradient (top: 0, height: 300)
+        Rectangle {
+            y: 0;
+            width: parent.width;
+            height: 300 * u;
+            background: @linear-gradient(180deg, #040A0C52 0%, #040A0C24 50%, #040A0C00 100%);
+        }
     }
     // Photo List mode: left-weighted editorial dim + column scrim
     if mode == 1: Rectangle {
@@ -203,12 +208,13 @@ export component SkinHome inherits Window {
         width: 1504 * u;
         height: 232 * u;
 
-        // .mat: pre-baked optical frosted-glass backdrop cropped to exact dock rect
+        // .mat: pre-baked optical frosted-glass backdrop cropped to exact dock rect (GPU-cached)
         Rectangle {
             width: parent.width;
             height: parent.height;
             border-radius: 48 * u;
             clip: true;
+            cache-rendering-hint: true;
 
             Image {
                 x: -208 * u;
@@ -291,7 +297,7 @@ export component SkinHome inherits Window {
                         Image {
                             width: parent.width;
                             height: parent.height;
-                            source: tile.image;
+                            source: tile.mono-image;
                             image-fit: tile.kind == 1 ? contain : cover;
                         }
                     }
@@ -315,6 +321,25 @@ export component SkinHome inherits Window {
                     }
                     TouchArea { clicked => { RustTV.tile-clicked(i, false); } }
                 }
+            }
+
+            // Optical 132px left/right edge-fade overlays (mathematically equivalent to
+            // CSS mask-image fading peeking tiles into the exact frosted glass behind them).
+            if RustTV.i4 > 0: Image {
+                x: 0;
+                y: 0;
+                width: 132 * u;
+                height: 232 * u;
+                source: @image-url("fade-left.png");
+                image-fit: fill;
+            }
+            if RustTV.tiles.length > RustTV.i4 + 5: Image {
+                x: 1340 * u;
+                y: 0;
+                width: 132 * u;
+                height: 232 * u;
+                source: @image-url("fade-right.png");
+                image-fit: fill;
             }
         }
     }
@@ -414,7 +439,7 @@ export component SkinHome inherits Window {
                     Image {
                         width: parent.width;
                         height: parent.height;
-                        source: tile.image;
+                        source: tile.mono-image;
                         image-fit: tile.kind == 1 ? contain : cover;
                     }
                 }
@@ -505,7 +530,7 @@ export component SkinHome inherits Window {
                         Image {
                             width: parent.width;
                             height: parent.height;
-                            source: tile.image;
+                            source: tile.mono-image;
                             image-fit: tile.kind == 1 ? contain : cover;
                         }
                     }

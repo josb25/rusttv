@@ -48,7 +48,9 @@ fn sync_scroll(idx, mode) {
 }
 
 fn on_init() {
-    set_int(0, 0);
+    let saved = load_pref("layout", "dock");
+    let mode = if saved == "list" { 1 } else { 0 };
+    set_int(0, mode);
     set_int(1, 0);
     set_int(2, 2);
     set_int(3, 0);
@@ -66,6 +68,7 @@ fn trigger_util(idx) {
     if idx == 0 {
         let next_mode = if mode == 1 { 0 } else { 1 };
         set_int(0, next_mode);
+        save_pref("layout", if next_mode == 1 { "list" } else { "dock" });
         set_int(4, 0);
         sync_scroll(get_int(3), next_mode);
         set_str(0, util_label(0, next_mode));

@@ -1232,6 +1232,13 @@ struct Controller {
     /// Last focused index pushed into `active_skin` (so `on_focus` fires once per change).
     #[cfg(feature = "skins")]
     skin_last_focus: Option<i32>,
+    /// Signature of the tile list last pushed into `active_skin` (avoids rebuilding
+    /// `VecModel<SkinTile>` on every D-pad focus move for locked 60 fps).
+    #[cfg(feature = "skins")]
+    skin_tiles_sig: Vec<(String, String, bool)>,
+    /// Last `(clock, greeting, date)` pushed into `active_skin`.
+    #[cfg(feature = "skins")]
+    skin_clock_sig: (String, String, String),
     /// Whether Settings → Effects is in Reduced mode (skip hero glow work).
     reduced_effects: bool,
 }
@@ -1428,6 +1435,10 @@ impl Controller {
                 skin_visible: false,
                 #[cfg(feature = "skins")]
                 skin_last_focus: None,
+                #[cfg(feature = "skins")]
+                skin_tiles_sig: Vec::new(),
+                #[cfg(feature = "skins")]
+                skin_clock_sig: (String::new(), String::new(), String::new()),
                 reduced_effects,
             })
         });
@@ -2037,13 +2048,24 @@ impl Controller {
     pub(super) fn select_theme(&mut self, id: &str) {
         #[cfg(feature = "skins")]
         if let Some(manifest) = self.skins.iter().find(|s| s.id == id).cloned() {
-            match crate::skin_runtime::SkinInstance::load(&manifest) {
+            let prefs_dir = self
+                .options
+                .order_file
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .map(|dir| dir.join("skin-prefs"));
+            match crate::skin_runtime::SkinInstance::load_with_prefs(
+                &manifest,
+                prefs_dir.as_deref(),
+            ) {
                 Ok(skin) => {
                     if let Some(prev) = self.active_skin.take() {
                         let _ = prev.hide();
                     }
                     self.skin_visible = false;
                     self.skin_last_focus = None;
+                    self.skin_tiles_sig.clear();
+                    self.skin_clock_sig = (String::new(), String::new(), String::new());
                     let me_key = self.me.clone();
                     let me_tile = self.me.clone();
                     let me_action = self.me.clone();
@@ -2199,41 +2221,81 @@ impl Controller {
         if self.active_skin.is_none() {
             return;
         }
-        let skin_tiles: Vec<crate::skin_runtime::SkinTileData> = self
+        // Only rebuild `RustTV.tiles` when tile IDs, labels, or running states
+        // actually change — never on plain D-pad focus moves, so Slint keeps
+        // animations and GPU textures alive at a locked 60 fps.
+        let tiles_sig: Vec<(String, String, bool)> = self
             .home
             .tiles()
             .iter()
             .map(|id| {
-                let data = self.tile_data(id);
-                crate::skin_runtime::SkinTileData {
-                    id: order_file::name_of(id),
-                    label: data.label.to_string(),
-                    image: data.image,
-                    kind: data.kind,
-                    running: data.running,
-                    tint: data.tint,
-                }
+                let name = order_file::name_of(id);
+                let label = match id {
+                    TileId::App(app_id) => self
+                        .apps
+                        .get(app_id)
+                        .map(|a| a.label.to_string())
+                        .unwrap_or_else(|| name.clone()),
+                    _ => self.tile_data(id).label.to_string(),
+                };
+                let running = match id {
+                    TileId::App(app_id) => self.home.is_app_running(app_id),
+                    _ => false,
+                };
+                (name, label, running)
             })
             .collect();
+        let tiles_changed = tiles_sig != self.skin_tiles_sig;
+        let skin_tiles = if tiles_changed {
+            self.skin_tiles_sig = tiles_sig;
+            Some(
+                self.home
+                    .tiles()
+                    .iter()
+                    .map(|id| {
+                        let data = self.tile_data(id);
+                        crate::skin_runtime::SkinTileData {
+                            id: order_file::name_of(id),
+                            label: data.label.to_string(),
+                            image: data.image,
+                            kind: data.kind,
+                            running: data.running,
+                            tint: data.tint,
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+
         let focus = i32::try_from(self.home.focus()).unwrap_or(0);
+        let focus_changed = self.skin_last_focus != Some(focus);
         let focus_id = self
             .home
             .focused()
             .map(order_file::name_of)
             .unwrap_or_default();
-        let focus_label = skin_tiles
-            .get(usize::try_from(focus).unwrap_or(usize::MAX))
-            .map(|t| t.label.clone())
-            .unwrap_or_default();
-        let hero_image = skin_tiles
-            .get(usize::try_from(focus).unwrap_or(usize::MAX))
-            .map(|t| t.image.clone())
-            .unwrap_or_default();
-        let hero_color = skin_tiles
-            .get(usize::try_from(focus).unwrap_or(usize::MAX))
-            .map(|t| t.tint)
-            .unwrap_or_else(|| self.active_theme.colors.surface.to_slint());
-        let (clock, greeting, date) = if let Some(window) = self.window.upgrade() {
+        let focused_hero = if focus_changed || tiles_changed {
+            let focused_data = self.home.focused().map(|id| self.tile_data(id));
+            let label = focused_data
+                .as_ref()
+                .map(|d| d.label.to_string())
+                .unwrap_or_default();
+            let image = focused_data
+                .as_ref()
+                .map(|d| d.image.clone())
+                .unwrap_or_default();
+            let color = focused_data
+                .as_ref()
+                .map(|d| d.tint)
+                .unwrap_or_else(|| self.active_theme.colors.surface.to_slint());
+            Some((label, color, image))
+        } else {
+            None
+        };
+
+        let clock_sig = if let Some(window) = self.window.upgrade() {
             (
                 window.get_clock_text().to_string(),
                 window.get_greeting_text().to_string(),
@@ -2242,18 +2304,31 @@ impl Controller {
         } else {
             (String::new(), String::new(), String::new())
         };
+        let clock_changed = clock_sig != self.skin_clock_sig;
+        if clock_changed {
+            self.skin_clock_sig = clock_sig.clone();
+        }
+
         // Keep the programmable skin as the sole visible launcher window on
         // the home screen (Browse or Bar) — even while an external app is in
         // front, so pressing Home always returns to the active Pro skin rather
         // than the stock `HomeWindow`. Only swap back to `HomeWindow` for
         // built-in overlays (Settings, Folder, Hidden apps, Menu, etc.).
         let should_show = matches!(self.home.state(), State::Browse | State::Bar);
-        let focus_changed = self.skin_last_focus != Some(focus);
         let home_win = self.window.upgrade();
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
-            skin.set_tiles(&skin_tiles);
-            skin.set_clock(&clock, &greeting, &date);
-            skin.set_hero(&focus_label, hero_color, hero_image);
+            if let Some(tiles) = &skin_tiles {
+                skin.set_tiles(tiles);
+            }
+            if clock_changed {
+                skin.set_clock(&clock_sig.0, &clock_sig.1, &clock_sig.2);
+            }
+            let focus_label = if let Some((label, color, image)) = focused_hero {
+                skin.set_hero(&label, color, image);
+                label
+            } else {
+                String::new()
+            };
             let cmds = if focus_changed {
                 self.skin_last_focus = Some(focus);
                 skin.set_focused(focus, &focus_id, &focus_label)
