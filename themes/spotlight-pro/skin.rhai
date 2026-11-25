@@ -101,23 +101,35 @@ fn on_key(key, pressed) {
     }
 
     if !pressed { return false; }
+    let tab = get_int(0);
+    let cur = get_int(3);
+    let max_idx = tile_count() - 1;
     if key == "Left" {
-        let cur = get_int(3);
         if cur > 0 { focus(cur - 1); }
         return true;
     }
     if key == "Right" {
-        let cur = get_int(3);
-        let max_idx = tile_count() - 1;
         if cur < max_idx { focus(cur + 1); }
         return true;
     }
     if key == "Down" {
+        if tab == 3 {
+            let next = cur + 6;
+            if next <= max_idx {
+                focus(next);
+            } else if (cur / 6) < (max_idx / 6) {
+                focus(max_idx);
+            }
+        }
         return true;
     }
     if key == "Up" {
+        if tab == 3 && cur >= 6 {
+            focus(cur - 6);
+            return true;
+        }
         set_int(1, 1);
-        set_int(2, get_int(0));
+        set_int(2, tab);
         return true;
     }
     if key == "q" || key == "[" {
