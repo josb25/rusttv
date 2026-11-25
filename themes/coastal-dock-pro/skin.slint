@@ -56,6 +56,7 @@ export component SkinHome inherits Window {
     HorizontalLayout {
         x: parent.width - self.preferred-width - 96 * u;
         y: 44 * u;
+        width: self.preferred-width;
         height: 52 * u;
         spacing: RustTV.i0 == 0 ? 34 * u : 24 * u;
 
@@ -151,7 +152,7 @@ export component SkinHome inherits Window {
 
         for tile[i] in RustTV.tiles: Rectangle {
             property <bool> is-focused: RustTV.i1 == 0 && i == RustTV.focused-index;
-            x: parent.pad + i * (parent.slot-w + parent.gap);
+            x: parent.pad + (i - RustTV.i4) * (parent.slot-w + parent.gap);
             y: parent.pad;
             width: parent.slot-w;
             height: parent.height - 2 * parent.pad;
@@ -159,7 +160,7 @@ export component SkinHome inherits Window {
             background: is-focused ? @linear-gradient(180deg, #FFFFFF3E 0%, #FFFFFF14 100%) : transparent;
             border-width: is-focused ? 1.5 * u : 0px;
             border-color: #FFFFFF6C;
-            visible: i < 6;
+            visible: i >= RustTV.i4 && i < RustTV.i4 + 6;
             animate background { duration: 140ms; easing: ease-out; }
 
             Rectangle {

@@ -29,11 +29,20 @@ fn select_tab(idx) {
 fn on_init() {
     set_int(1, 0); // focus zone: 0 = app dock, 1 = top bar
     set_int(2, 0); // top-bar cursor: 0..=4 = tabs, 5 = Settings
+    set_int(3, 0); // focused app index
+    set_int(4, 0); // horizontal dock scroll offset
     select_tab(0);
     set_str(1, "Trending  |  Ready to launch on RustTV");
 }
 
 fn on_focus(index, id, label) {
+    set_int(3, index);
+    let scroll = get_int(4);
+    if index < scroll {
+        set_int(4, index);
+    } else if index >= scroll + 10 {
+        set_int(4, index - 9);
+    }
     let total = tile_count();
     let pos = index + 1;
     set_str(1, tab_name(get_int(0)) + "  |  " + label + " (" + pos + " of " + total + ")");
@@ -92,6 +101,20 @@ fn on_key(key, pressed) {
     }
 
     if !pressed { return false; }
+    if key == "Left" {
+        let cur = get_int(3);
+        if cur > 0 { focus(cur - 1); }
+        return true;
+    }
+    if key == "Right" {
+        let cur = get_int(3);
+        let max_idx = tile_count() - 1;
+        if cur < max_idx { focus(cur + 1); }
+        return true;
+    }
+    if key == "Down" {
+        return true;
+    }
     if key == "Up" {
         set_int(1, 1);
         set_int(2, get_int(0));
