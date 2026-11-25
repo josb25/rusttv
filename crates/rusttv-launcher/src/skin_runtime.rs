@@ -642,15 +642,22 @@ impl SkinInstance {
             })
             .collect();
         let icons_dir = self.manifest.dir.join("icons");
-        let resolved = ["svg", "png"]
-            .into_iter()
-            .find_map(|ext| {
-                let path = icons_dir.join(format!("{safe}.{ext}"));
-                path.is_file()
-                    .then(|| slint::Image::load_from_path(&path).ok())
-                    .flatten()
-            })
-            .unwrap_or_else(|| make_mono_image(&tile.image));
+        if let Some(custom) = ["svg", "png"].into_iter().find_map(|ext| {
+            let path = icons_dir.join(format!("{safe}.{ext}"));
+            path.is_file()
+                .then(|| slint::Image::load_from_path(&path).ok())
+                .flatten()
+        }) {
+            self.mono_cache
+                .borrow_mut()
+                .insert(tile.id.clone(), custom.clone());
+            return custom;
+        }
+        // Don't cache empty placeholders while the async icon loader is still running.
+        if tile.image.size().width == 0 {
+            return tile.image.clone();
+        }
+        let resolved = make_mono_image(&tile.image);
         self.mono_cache
             .borrow_mut()
             .insert(tile.id.clone(), resolved.clone());

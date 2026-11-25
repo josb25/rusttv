@@ -1233,9 +1233,10 @@ struct Controller {
     #[cfg(feature = "skins")]
     skin_last_focus: Option<i32>,
     /// Signature of the tile list last pushed into `active_skin` (avoids rebuilding
-    /// `VecModel<SkinTile>` on every D-pad focus move for locked 60 fps).
+    /// `VecModel<SkinTile>` on every D-pad focus move for locked 60 fps, while still
+    /// updating as soon as async icons finish loading).
     #[cfg(feature = "skins")]
-    skin_tiles_sig: Vec<(String, String, bool)>,
+    skin_tiles_sig: Vec<(String, String, bool, i32, u32)>,
     /// Last `(clock, greeting, date)` pushed into `active_skin`.
     #[cfg(feature = "skins")]
     skin_clock_sig: (String, String, String),
@@ -2224,25 +2225,28 @@ impl Controller {
         // Only rebuild `RustTV.tiles` when tile IDs, labels, or running states
         // actually change — never on plain D-pad focus moves, so Slint keeps
         // animations and GPU textures alive at a locked 60 fps.
-        let tiles_sig: Vec<(String, String, bool)> = self
+        let tiles_sig: Vec<(String, String, bool, i32, u32)> = self
             .home
             .tiles()
             .iter()
             .map(|id| {
                 let name = order_file::name_of(id);
-                let label = match id {
+                let (label, kind, img_w) = match id {
                     TileId::App(app_id) => self
                         .apps
                         .get(app_id)
-                        .map(|a| a.label.to_string())
-                        .unwrap_or_else(|| name.clone()),
-                    _ => self.tile_data(id).label.to_string(),
+                        .map(|a| (a.label.clone(), a.kind, a.image.size().width))
+                        .unwrap_or_else(|| (name.clone(), 4, 0)),
+                    _ => {
+                        let d = self.tile_data(id);
+                        (d.label.to_string(), d.kind, d.image.size().width)
+                    }
                 };
                 let running = match id {
                     TileId::App(app_id) => self.home.is_app_running(app_id),
                     _ => false,
                 };
-                (name, label, running)
+                (name, label, running, kind, img_w)
             })
             .collect();
         let tiles_changed = tiles_sig != self.skin_tiles_sig;

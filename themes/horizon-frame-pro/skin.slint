@@ -201,11 +201,11 @@ export component SkinHome inherits Window {
         animate opacity { duration: 120ms; easing: linear; }
     }
 
-    // 4. MODE 0: Floating Frosted Glass Dock (.dock: left 208, top 676, width 1504, height 232)
+    // 4. MODE 0: Floating Frosted Glass Dock (left 100, top 676, width 1720, height 232 -> 5 full + peeking 6th)
     if mode == 0: Rectangle {
-        x: 208 * u;
+        x: 100 * u;
         y: 676 * u;
-        width: 1504 * u;
+        width: 1720 * u;
         height: 232 * u;
 
         // .mat: pre-baked optical frosted-glass backdrop cropped to exact dock rect (GPU-cached)
@@ -217,7 +217,7 @@ export component SkinHome inherits Window {
             cache-rendering-hint: true;
 
             Image {
-                x: -208 * u;
+                x: -100 * u;
                 y: -676 * u;
                 width: root.width;
                 height: root.height;
@@ -241,11 +241,11 @@ export component SkinHome inherits Window {
             }
         }
 
-        // .shelf: left 16, width 1472, height 232, clip
+        // .shelf: left 16, width 1688, height 232, clip (5 full 288px tiles + 248px peeking 6th)
         Rectangle {
             x: 16 * u;
             y: 0;
-            width: 1472 * u;
+            width: 1688 * u;
             height: 232 * u;
             clip: true;
 
@@ -334,7 +334,7 @@ export component SkinHome inherits Window {
                 image-fit: fill;
             }
             if RustTV.tiles.length > RustTV.i4 + 5: Image {
-                x: 1340 * u;
+                x: 1556 * u;
                 y: 0;
                 width: 132 * u;
                 height: 232 * u;
@@ -346,7 +346,7 @@ export component SkinHome inherits Window {
 
     // Left / Right scroll cues (.cue: top 768, 48x48 radius 24, rgba(8,14,18,0.28))
     if mode == 0 && RustTV.i4 > 0: Rectangle {
-        x: 140 * u;
+        x: 36 * u;
         y: 768 * u;
         width: 48 * u;
         height: 48 * u;
@@ -368,7 +368,7 @@ export component SkinHome inherits Window {
         }
     }
     if mode == 0 && RustTV.tiles.length > RustTV.i4 + 5: Rectangle {
-        x: 1732 * u;
+        x: 1836 * u;
         y: 768 * u;
         width: 48 * u;
         height: 48 * u;
