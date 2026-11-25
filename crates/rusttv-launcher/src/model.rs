@@ -1763,6 +1763,17 @@ impl Home {
         }
     }
 
+    /// Opens the Settings page directly (e.g. from a programmable skin).
+    pub fn open_settings(&mut self) -> Option<Effect> {
+        if matches!(self.mode, Mode::Browse | Mode::Bar { .. }) {
+            self.page_folder = None;
+            self.mode = Mode::Settings { history: false };
+            Some(Effect::OpenSettings)
+        } else {
+            None
+        }
+    }
+
     /// Leaves the Settings page (it decides when: Back on its section list).
     pub fn close_settings(&mut self) {
         if matches!(self.mode, Mode::Settings { .. }) {

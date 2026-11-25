@@ -419,7 +419,14 @@ pub(crate) fn pointer_changed() {
 
 /// Shows the home screen and runs the UI event loop until the window closes.
 pub fn run(platform: impl Platform + 'static, options: RunOptions) -> Result<(), PlatformError> {
-    let (window, _controller) = start(platform, options, real_clock())?;
+    let (window, controller) = start(platform, options, real_clock())?;
+    #[cfg(feature = "skins")]
+    if controller.borrow().skin_visible {
+        // The programmable skin window is already shown and fullscreen; keep
+        // `HomeWindow` hidden so Wayland only sees the active Pro skin.
+        return slint::run_event_loop().map_err(ui_error);
+    }
+    let _ = controller;
     window.run().map_err(ui_error)
 }
 
@@ -2083,8 +2090,14 @@ impl Controller {
         };
         #[cfg(feature = "skins")]
         if let Some(prev) = self.active_skin.take() {
-            let _ = prev.hide();
-            self.skin_visible = false;
+            if self.skin_visible {
+                if let Some(window) = self.window.upgrade() {
+                    window.window().set_fullscreen(true);
+                    let _ = window.show();
+                }
+                let _ = prev.hide();
+                self.skin_visible = false;
+            }
             self.skin_last_focus = None;
         }
         let bg_changed = spec.colors.bg != self.active_theme.colors.bg;
@@ -2162,8 +2175,10 @@ impl Controller {
                 HostCommand::Launch(index) => self.tile_pointer(false, index, 1),
                 HostCommand::Focus(index) => self.tile_pointer(false, index, 0),
                 HostCommand::OpenSettings => {
-                    self.open_settings();
-                    self.render();
+                    if self.home.open_settings().is_some() {
+                        self.open_settings();
+                        self.render();
+                    }
                 }
             }
         }
@@ -2218,13 +2233,14 @@ impl Controller {
         } else {
             (String::new(), String::new(), String::new())
         };
-        // Show the programmable skin whenever Home is on the main screen
-        // (Browse or Top bar) and no external app is in front (note: `self.away`
-        // also flips true when HomeWindow yields Wayland focus to our own
-        // SkinHome window, so we gate on `front_app.is_none()` instead).
-        let should_show =
-            matches!(self.home.state(), State::Browse | State::Bar) && self.front_app.is_none();
+        // Keep the programmable skin as the sole visible launcher window on
+        // the home screen (Browse or Bar) — even while an external app is in
+        // front, so pressing Home always returns to the active Pro skin rather
+        // than the stock `HomeWindow`. Only swap back to `HomeWindow` for
+        // built-in overlays (Settings, Folder, Hidden apps, Menu, etc.).
+        let should_show = matches!(self.home.state(), State::Browse | State::Bar);
         let focus_changed = self.skin_last_focus != Some(focus);
+        let home_win = self.window.upgrade();
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
             skin.set_tiles(&skin_tiles);
             skin.set_clock(&clock, &greeting, &date);
@@ -2237,8 +2253,15 @@ impl Controller {
             };
             if should_show && !self.skin_visible {
                 let _ = skin.show();
+                if let Some(window) = &home_win {
+                    let _ = window.hide();
+                }
                 self.skin_visible = true;
             } else if !should_show && self.skin_visible {
+                if let Some(window) = &home_win {
+                    window.window().set_fullscreen(true);
+                    let _ = window.show();
+                }
                 let _ = skin.hide();
                 self.skin_visible = false;
             }
