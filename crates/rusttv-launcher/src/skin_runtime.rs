@@ -223,39 +223,158 @@ fn save_prefs_file(path: &Path, prefs: &BTreeMap<String, String>) {
 }
 
 /// Converts a launcher icon bitmap into a crisp warm-white (`#F4F4F1`) monochrome
-/// mark for minimalist glass/editorial skins. Transparent-background icons keep
-/// their exact alpha silhouette; opaque icons map luminance contrast into alpha.
+/// mark using adaptive foreground/backing separation:
+///
+/// 1. Samples the outer perimeter of the icon's non-transparent bounding box to
+///    find the dominant backing color (e.g. YouTube red, Spotify green, or a white
+///    square card).
+/// 2. If the icon has a distinct inner foreground glyph (`dist` from backing):
+///    - White/near-white square cards (`bg_luma > 215`) knock out the card to 0%
+///      alpha so only the crisp white inner logo remains.
+///    - Coloured/dark badges render the inner glyph at 100% crisp warm white and
+///      the badge backing as a soft 22% translucent frosted-glass silhouette so
+///      recognizable shapes (rounded rects, circles, diamonds) stay legible.
+/// 3. Simple transparent glyphs with no distinct backing keep their exact alpha
+///    at 100% warm white.
 fn make_mono_image(src: &slint::Image) -> slint::Image {
     let Some(rgba) = src.to_rgba8() else {
         return src.clone();
     };
-    let (w, h) = (rgba.width(), rgba.height());
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
     if w == 0 || h == 0 {
         return src.clone();
     }
     let pixels = rgba.as_slice();
-    let has_transparency = pixels.iter().any(|p| p.a < 240);
-    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
+
+    // 1. Find bounding box of visible pixels (a >= 32).
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0usize, 0usize);
+    let mut visible_count = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            if pixels[y * w + x].a >= 32 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                visible_count += 1;
+            }
+        }
+    }
+    if visible_count == 0 {
+        return src.clone();
+    }
+
+    // 2. Sample the outer ~12% perimeter ring of the bounding box to estimate
+    //    the dominant backing colour (histogram quantised to 16-level buckets).
+    let bw = (max_x - min_x + 1).max(1);
+    let bh = (max_y - min_y + 1).max(1);
+    let ring_x = (bw / 8).max(2);
+    let ring_y = (bh / 8).max(2);
+    let mut buckets: HashMap<(u8, u8, u8), (u64, u64, u64, u64)> = HashMap::new();
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let on_ring = x < min_x + ring_x
+                || x + ring_x > max_x
+                || y < min_y + ring_y
+                || y + ring_y > max_y;
+            if !on_ring {
+                continue;
+            }
+            let p = pixels[y * w + x];
+            if p.a < 180 {
+                continue;
+            }
+            let key = (p.r >> 4, p.g >> 4, p.b >> 4);
+            let entry = buckets.entry(key).or_insert((0, 0, 0, 0));
+            entry.0 += 1;
+            entry.1 += u64::from(p.r);
+            entry.2 += u64::from(p.g);
+            entry.3 += u64::from(p.b);
+        }
+    }
+
+    let bg = buckets
+        .into_values()
+        .max_by_key(|v| v.0)
+        .filter(|v| v.0 > 0)
+        .map(|(n, r, g, b)| ((r / n) as i32, (g / n) as i32, (b / n) as i32));
+
+    // Measure whether there is a real backing + distinct inner foreground glyph.
+    let mut is_badge = false;
+    let mut bg_is_light_card = false;
+    if let Some((br, bg_g, bb)) = bg {
+        let mut near_bg = 0usize;
+        let mut far_fg = 0usize;
+        for p in pixels {
+            if p.a < 128 {
+                continue;
+            }
+            let dr = i32::from(p.r) - br;
+            let dg = i32::from(p.g) - bg_g;
+            let db = i32::from(p.b) - bb;
+            let dist = ((dr * dr + dg * dg + db * db) as f32).sqrt();
+            if dist < 48.0 {
+                near_bg += 1;
+            } else if dist > 72.0 {
+                far_fg += 1;
+            }
+        }
+        // Badge icon if >= 25% matches backing and >= 4% is a distinct inner glyph.
+        is_badge = near_bg * 4 >= visible_count && far_fg * 25 >= visible_count;
+        let bg_luma = (br * 77 + bg_g * 150 + bb * 29) >> 8;
+        // Check if corners of the bounding box are opaque + very light (white card).
+        let corners_opaque = [
+            pixels[min_y * w + min_x].a,
+            pixels[min_y * w + max_x].a,
+            pixels[max_y * w + min_x].a,
+            pixels[max_y * w + max_x].a,
+        ]
+        .iter()
+        .filter(|&&a| a >= 200)
+        .count()
+            >= 3;
+        bg_is_light_card = bg_luma > 210 && corners_opaque;
+    }
+
+    let mut out = SharedPixelBuffer::<Rgba8Pixel>::new(w as u32, h as u32);
     let dst = out.make_mut_slice();
-    if has_transparency {
+
+    if let (true, Some((br, bg_g, bb))) = (is_badge, bg) {
+        // Soft frosted-glass backing alpha (0.0 for white square cards, 0.22 for coloured badges).
+        let backing_alpha = if bg_is_light_card { 0.0_f32 } else { 0.22_f32 };
+        for (s, d) in pixels.iter().zip(dst.iter_mut()) {
+            if s.a == 0 {
+                *d = Rgba8Pixel {
+                    r: 244,
+                    g: 244,
+                    b: 241,
+                    a: 0,
+                };
+                continue;
+            }
+            let dr = i32::from(s.r) - br;
+            let dg = i32::from(s.g) - bg_g;
+            let db = i32::from(s.b) - bb;
+            let dist = ((dr * dr + dg * dg + db * db) as f32).sqrt();
+            // Smooth anti-aliased transition from backing (dist <= 34) to crisp glyph (dist >= 92).
+            let fg_t = ((dist - 34.0) / 58.0).clamp(0.0, 1.0);
+            let weight = backing_alpha + (1.0 - backing_alpha) * fg_t;
+            let a = (f32::from(s.a) * weight).round().clamp(0.0, 255.0) as u8;
+            *d = Rgba8Pixel {
+                r: 244,
+                g: 244,
+                b: 241,
+                a,
+            };
+        }
+    } else {
+        // Pure transparent-background glyph (or uniform icon): crisp warm white.
         for (s, d) in pixels.iter().zip(dst.iter_mut()) {
             *d = Rgba8Pixel {
                 r: 244,
                 g: 244,
                 b: 241,
                 a: s.a,
-            };
-        }
-    } else {
-        // Opaque tile artwork: preserve soft luminance modulation as warm-white alpha.
-        for (s, d) in pixels.iter().zip(dst.iter_mut()) {
-            let luma = (u16::from(s.r) * 77 + u16::from(s.g) * 150 + u16::from(s.b) * 29) >> 8;
-            let a = (luma as u8).max(40);
-            *d = Rgba8Pixel {
-                r: 244,
-                g: 244,
-                b: 241,
-                a,
             };
         }
     }
