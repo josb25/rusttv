@@ -20,8 +20,8 @@ export component SkinHome inherits Window {
         }
     }
 
-    // Dynamic ambient hero colour glow driven by the focused app's tint.
-    Rectangle {
+    // Dynamic ambient hero colour glow driven by the focused app's tint (disabled in Reduced Effects).
+    if !RustTV.reduced-effects: Rectangle {
         width: parent.width;
         height: parent.height;
         background: @radial-gradient(
@@ -117,7 +117,7 @@ export component SkinHome inherits Window {
     }
 
     // 4-column scrolling app card grid.
-    Rectangle {
+    grid := Rectangle {
         x: 84 * u;
         y: 286 * u;
         width: parent.width - 168 * u;
@@ -131,25 +131,25 @@ export component SkinHome inherits Window {
 
         Rectangle {
             x: 0;
-            y: -RustTV.i4 * (parent.card-h + parent.gap);
-            width: parent.width;
+            y: -RustTV.i4 * (grid.card-h + grid.gap);
+            width: grid.width;
             height: 4000 * u;
-            animate y { duration: 180ms; easing: cubic-bezier(0.2, 0.7, 0.2, 1.0); }
+            animate y { duration: RustTV.reduced-effects ? 0ms : 180ms; easing: cubic-bezier(0.2, 0.7, 0.2, 1.0); }
 
             for tile[i] in RustTV.tiles: Rectangle {
-                property <bool> is-focused: RustTV.i1 == 0 && i == RustTV.focused-index;
+                property <bool> is-focused: RustTV.i1 == 0 && !RustTV.menu-open && i == RustTV.focused-index;
                 property <int> gcol: mod(i, 4);
                 property <int> grow: floor(i / 4);
                 property <float> sc: is-focused ? 1.05 : 1.0;
-                width: parent.parent.card-w * sc;
-                height: parent.parent.card-h * sc;
-                x: parent.parent.pad + gcol * (parent.parent.card-w + parent.parent.gap) - (self.width - parent.parent.card-w) / 2;
-                y: parent.parent.pad + grow * (parent.parent.card-h + parent.parent.gap) - (self.height - parent.parent.card-h) / 2;
+                width: grid.card-w * sc;
+                height: grid.card-h * sc;
+                x: grid.pad + gcol * (grid.card-w + grid.gap) - (self.width - grid.card-w) / 2;
+                y: grid.pad + grow * (grid.card-h + grid.gap) - (self.height - grid.card-h) / 2;
                 border-radius: 22 * u;
                 background: tile.tint.alpha > 0 ? tile.tint : #1A1E26;
                 border-width: is-focused ? 3.5 * u : 1 * u;
                 border-color: is-focused ? #FFFFFF : #FFFFFF1C;
-                animate width, height, x, y { duration: 160ms; easing: cubic-bezier(0.2, 0.7, 0.2, 1.0); }
+                animate width, height, x, y { duration: RustTV.reduced-effects ? 0ms : 160ms; easing: cubic-bezier(0.2, 0.7, 0.2, 1.0); }
 
                 Rectangle {
                     width: parent.width;
@@ -175,6 +175,55 @@ export component SkinHome inherits Window {
                     background: #FFFFFFEE;
                 }
                 TouchArea { clicked => { RustTV.tile-clicked(i, false); } }
+            }
+        }
+    }
+
+    // Native in-skin long-press context menu overlay.
+    if RustTV.menu-open: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #080A0EC8;
+
+        Rectangle {
+            width: 520 * u;
+            height: 112 * u + RustTV.menu-items.length * 76 * u;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 28 * u;
+            background: #181C24F2;
+            border-width: 1.5 * u;
+            border-color: #FFFFFF30;
+
+            Text {
+                x: 32 * u;
+                y: 26 * u;
+                width: parent.width - 64 * u;
+                text: RustTV.menu-title;
+                font-size: 32 * u;
+                font-weight: 600;
+                color: #FFFFFF;
+                overflow: elide;
+            }
+            for item[idx] in RustTV.menu-items: Rectangle {
+                property <bool> sel: idx == RustTV.menu-selected;
+                x: 20 * u;
+                y: 88 * u + idx * 76 * u;
+                width: parent.width - 40 * u;
+                height: 64 * u;
+                border-radius: 18 * u;
+                background: sel ? #F2F4F8 : transparent;
+                Text {
+                    x: 24 * u;
+                    width: parent.width - 48 * u;
+                    height: parent.height;
+                    text: item;
+                    font-size: 26 * u;
+                    font-weight: sel ? 600 : 500;
+                    color: sel ? #0F1115 : #F2F4F8D8;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { RustTV.menu-clicked(idx); } }
             }
         }
     }

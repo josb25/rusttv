@@ -338,4 +338,53 @@ export component SkinHome inherits Window {
             color: #A8B0BC;
         }
     }
+
+    // Native in-skin long-press context menu overlay.
+    if RustTV.menu-open: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #080A0EC8;
+
+        Rectangle {
+            width: 520 * u;
+            height: 112 * u + RustTV.menu-items.length * 76 * u;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 28 * u;
+            background: #1A1D24F4;
+            border-width: 1.5 * u;
+            border-color: #FFFFFF2E;
+
+            Text {
+                x: 32 * u;
+                y: 26 * u;
+                width: parent.width - 64 * u;
+                text: RustTV.menu-title;
+                font-size: 30 * u;
+                font-weight: 600;
+                color: #FFFFFF;
+                overflow: elide;
+            }
+            for item[idx] in RustTV.menu-items: Rectangle {
+                property <bool> sel: idx == RustTV.menu-selected;
+                x: 20 * u;
+                y: 88 * u + idx * 76 * u;
+                width: parent.width - 40 * u;
+                height: 64 * u;
+                border-radius: 20 * u;
+                background: sel ? #FFFFFF : transparent;
+                Text {
+                    x: 24 * u;
+                    width: parent.width - 48 * u;
+                    height: parent.height;
+                    text: item;
+                    font-size: 24 * u;
+                    font-weight: sel ? 600 : 500;
+                    color: sel ? #121212 : #E8EAEDD8;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { RustTV.menu-clicked(idx); } }
+            }
+        }
+    }
 }

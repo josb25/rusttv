@@ -2088,6 +2088,12 @@ impl Controller {
                             }
                         },
                     );
+                    let me_menu = self.me.clone();
+                    skin.set_menu_callback(move |idx| {
+                        if let Some(c) = me_menu.upgrade() {
+                            c.borrow_mut().list_pointer(0, idx, 1);
+                        }
+                    });
                     self.active_skin = Some(skin);
                     if let Some(dir) = self
                         .options
@@ -2158,6 +2164,11 @@ impl Controller {
 
     #[cfg(feature = "skins")]
     fn skin_key(&mut self, text: &str, pressed: bool, repeat: bool) -> bool {
+        // While the in-skin long-press context menu is open, route Up/Down/OK/Back
+        // directly to Home's menu state machine instead of the skin's dock handler.
+        if self.home.state() == State::Menu {
+            return self.key(text, pressed, repeat);
+        }
         let key_name = match text {
             "\u{F700}" => "Up",
             "\u{F701}" => "Down",
@@ -2313,15 +2324,34 @@ impl Controller {
             self.skin_clock_sig = clock_sig.clone();
         }
 
+        let (menu_open, menu_title, menu_items, menu_selected) = if self.home.state() == State::Menu
+        {
+            let items: Vec<String> = self.menu_items.iter().map(|s| s.to_string()).collect();
+            let title = self
+                .home
+                .focused()
+                .map(|id| self.tile_data(id).label.to_string())
+                .unwrap_or_default();
+            let sel = self
+                .window
+                .upgrade()
+                .map(|window| window.get_menu_selected())
+                .unwrap_or(0);
+            (true, title, items, sel)
+        } else {
+            (false, String::new(), Vec::new(), 0)
+        };
+
         // Keep the programmable skin as the sole visible launcher window on
-        // the home screen (Browse or Bar) — even while an external app is in
-        // front, so pressing Home always returns to the active Pro skin rather
-        // than the stock `HomeWindow`. Only swap back to `HomeWindow` for
-        // built-in overlays (Settings, Folder, Hidden apps, Menu, etc.).
+        // the home screen (Browse, Bar, Moving, or in-skin Menu) — even while
+        // an external app is in front, so pressing Home or long-pressing an app
+        // never flashes the stock `HomeWindow`. Only swap to `HomeWindow` for
+        // full-screen built-in pages (Settings, Folder, Hidden apps, About, Remote).
         let should_show = matches!(
             self.home.state(),
-            State::Browse | State::Bar | State::Moving
+            State::Browse | State::Bar | State::Moving | State::Menu
         );
+        let reduced_effects = self.reduced_effects;
         let home_win = self.window.upgrade();
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
             if let Some(tiles) = &skin_tiles {
@@ -2330,6 +2360,8 @@ impl Controller {
             if clock_changed {
                 skin.set_clock(&clock_sig.0, &clock_sig.1, &clock_sig.2);
             }
+            skin.set_reduced_effects(reduced_effects);
+            skin.set_menu(menu_open, &menu_title, &menu_items, menu_selected);
             let focus_label = if let Some((label, color, image)) = focused_hero {
                 skin.set_hero(&label, color, image);
                 label

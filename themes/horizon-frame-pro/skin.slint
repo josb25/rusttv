@@ -553,4 +553,54 @@ export component SkinHome inherits Window {
             }
         }
     }
+
+    // 7. Native in-skin long-press context menu overlay (frosted glass sheet).
+    if RustTV.menu-open: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #080C0EB8;
+
+        Rectangle {
+            width: 540 * u;
+            height: 116 * u + RustTV.menu-items.length * 76 * u;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 36 * u;
+            background: #141A20EB;
+            border-width: 1 * u;
+            border-color: #FFFFFF3D;
+
+            Text {
+                x: 36 * u;
+                y: 28 * u;
+                width: parent.width - 72 * u;
+                text: RustTV.menu-title;
+                font-size: 32 * u;
+                font-weight: 500;
+                letter-spacing: -0.6 * u;
+                color: #F4F4F1;
+                overflow: elide;
+            }
+            for item[idx] in RustTV.menu-items: Rectangle {
+                property <bool> sel: idx == RustTV.menu-selected;
+                x: 20 * u;
+                y: 92 * u + idx * 76 * u;
+                width: parent.width - 40 * u;
+                height: 64 * u;
+                border-radius: 24 * u;
+                background: sel ? #F3F3EF : transparent;
+                Text {
+                    x: 24 * u;
+                    width: parent.width - 48 * u;
+                    height: parent.height;
+                    text: item;
+                    font-size: 28 * u;
+                    font-weight: 500;
+                    color: sel ? #141618 : #F4F4F1D8;
+                    vertical-alignment: center;
+                }
+                TouchArea { clicked => { RustTV.menu-clicked(idx); } }
+            }
+        }
+    }
 }

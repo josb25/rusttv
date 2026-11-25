@@ -84,7 +84,13 @@ export global RustTV {
     in-out property <int> quick-selected: -1;
     in-out property <int> mode: 0;
     in-out property <bool> rtl: false;
+    in-out property <bool> reduced-effects: false;
     in-out property <string> toast: "";
+    // Native in-skin long-press / context menu state.
+    in-out property <bool> menu-open: false;
+    in-out property <string> menu-title: "";
+    in-out property <[string]> menu-items;
+    in-out property <int> menu-selected: 0;
 
     // Reactive state slots controlled by optional skin.rhai scripts.
     in-out property <string> s0: "";
@@ -120,6 +126,7 @@ export global RustTV {
     callback quick-hovered(int);
     callback scrolled(length);
     callback action(string, string);
+    callback menu-clicked(int);
 }
 "#;
 
@@ -1217,6 +1224,65 @@ impl SkinInstance {
         }
         self.sync_script_slots();
         self.take_commands()
+    }
+
+    /// Updates `RustTV.reduced-effects` from Settings → Effects.
+    pub fn set_reduced_effects(&self, reduced: bool) {
+        let _ = self.instance.set_global_property(
+            "RustTV",
+            "reduced-effects",
+            InterpValue::Bool(reduced),
+        );
+    }
+
+    /// Updates the in-skin long-press context menu state on `RustTV`.
+    pub fn set_menu(&self, open: bool, title: &str, items: &[String], selected: i32) {
+        if !open
+            && matches!(
+                self.instance.get_global_property("RustTV", "menu-open"),
+                Ok(InterpValue::Bool(false))
+            )
+        {
+            return;
+        }
+        let _ = self
+            .instance
+            .set_global_property("RustTV", "menu-open", InterpValue::Bool(open));
+        let _ = self.instance.set_global_property(
+            "RustTV",
+            "menu-title",
+            InterpValue::String(SharedString::from(title)),
+        );
+        let rows: Vec<InterpValue> = items
+            .iter()
+            .map(|s| InterpValue::String(SharedString::from(s.as_str())))
+            .collect();
+        let model = ModelRc::from(Rc::new(VecModel::from(rows)));
+        let _ =
+            self.instance
+                .set_global_property("RustTV", "menu-items", InterpValue::Model(model));
+        let _ = self.instance.set_global_property(
+            "RustTV",
+            "menu-selected",
+            InterpValue::Number(f64::from(selected)),
+        );
+    }
+
+    /// Registers a mouse/touch click handler for `RustTV.menu-clicked(index)`.
+    pub fn set_menu_callback<F>(&self, on_menu_click: F)
+    where
+        F: Fn(i32) + 'static,
+    {
+        let _ = self
+            .instance
+            .set_global_callback("RustTV", "menu-clicked", move |args| {
+                let idx = match args.first() {
+                    Some(InterpValue::Number(n)) => *n as i32,
+                    _ => -1,
+                };
+                on_menu_click(idx);
+                InterpValue::Void
+            });
     }
 
     /// Updates clock, greeting, and date strings on `RustTV`.
