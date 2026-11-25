@@ -472,8 +472,9 @@ impl SkinInstance {
         self.instance.window()
     }
 
-    /// Shows the skin window.
+    /// Shows the skin window fullscreen.
     pub fn show(&self) -> Result<(), String> {
+        self.instance.window().set_fullscreen(true);
         self.instance.show().map_err(|e| e.to_string())
     }
 
@@ -994,7 +995,7 @@ export component SkinHome inherits Window { width: 100px; height: 100px; }
     }
 
     #[test]
-    fn bundled_google_tv_pro_programmable_skin_loads_and_switches_tabs() {
+    fn bundled_spotlight_pro_programmable_skin_loads_and_switches_tabs() {
         thread_local!(static BACKEND: () = i_slint_backend_testing::init_no_event_loop());
         BACKEND.with(|_| {});
 
@@ -1003,11 +1004,22 @@ export component SkinHome inherits Window { width: 100px; height: 100px; }
             .join("..")
             .join("themes");
         let skins = discover_skins(std::slice::from_ref(&themes_dir));
+        for expected in [
+            "skin:spotlight-pro",
+            "skin:coastal-dock-pro",
+            "skin:ambient-pills-pro",
+        ] {
+            let manifest = skins
+                .iter()
+                .find(|s| s.id == expected)
+                .unwrap_or_else(|| panic!("missing bundled skin {expected}"));
+            let _ = SkinInstance::load(manifest).unwrap_or_else(|e| panic!("{expected}: {e}"));
+        }
         let manifest = skins
             .iter()
-            .find(|s| s.id == "skin:google-tv-pro")
-            .expect("google-tv-pro programmable skin");
-        let mut skin = SkinInstance::load(manifest).expect("compile google-tv-pro");
+            .find(|s| s.id == "skin:spotlight-pro")
+            .expect("spotlight-pro programmable skin");
+        let mut skin = SkinInstance::load(manifest).expect("compile spotlight-pro");
         assert_eq!(skin.get_str_slot(0), "For you");
         assert_eq!(skin.get_str_slot(2), "Your apps");
 

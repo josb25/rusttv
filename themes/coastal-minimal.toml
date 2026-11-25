@@ -1,16 +1,16 @@
-# Reference skin: Projectivy Glass (labeled top bar + frosted wallpaper dock)
-# Full-bleed coastal wallpaper, top-left clean clock, borderless inline-label
-# top-right controls, optical frosted-glass bottom dock, unframed icons with
+# Reference theme: Coastal Minimal (bare icons top bar + frosted wallpaper dock)
+# Full-bleed coastal wallpaper, top-left clean clock, borderless monochrome
+# top-right icons, optical frosted-glass bottom dock, unframed icons with
 # labels inside, and frosted glass-pill focus highlight.
 schema_version = 1
-name = "Projectivy Glass"
+name = "Coastal Minimal"
 author = "RustTV"
-description = "Full-bleed wallpaper with optical frosted glass dock and inline top bar"
+description = "Full-bleed wallpaper with optical frosted glass dock and bare monochrome icons"
 
 [colors]
 bg = "#0C141C"
 surface = "#16222E"
-dock_bg = "#14202C72"
+dock_bg = "#14202C68"
 text = "#F6F8FA"
 text_dim = "#B8C6D4"
 accent = "#5EC4D6"
@@ -32,7 +32,7 @@ focus_style = "glass-pill"
 dock_surface = true
 dock_blur = true
 dock_radius = 28
-top_bar_style = "inline-labels"
+top_bar_style = "bare-icons"
 clock_position = "top-start"
 tile_radius = 22
 panel_radius = 24
@@ -59,4 +59,4 @@ motion_scale = 0.9
 image = "coastal-cliff.svg"
 image_opacity = 1.0
 scrim = "vignette"
-scrim_strength = 0.22
+scrim_strength = 0.20

@@ -12,12 +12,12 @@ RustTV supports built-in and user-authored UI skins defined as small, declarativ
 
 ## Reference Skins (`themes/`)
 
-Thirteen ready-to-use reference skins demonstrating distinct launcher architectures are included in [`themes/`](themes/):
+Thirteen ready-to-use TOML skins and three standalone Level 3 programmable skins are included in [`themes/`](themes/):
 
-- **`projectivy-glass.toml`** (*Projectivy Glass*) — Full-bleed coastal wallpaper (`coastal-cliff.svg`), top-left clean clock, borderless inline-label top-right controls (`inline-labels`), optical pre-baked frosted-glass floating bottom dock (`dock_blur = true`), unframed dock icons with labels inside (`dock-icon`), and frosted glass-pill focus (`glass-pill`).
-- **`projectivy-minimal.toml`** (*Projectivy Minimal*) — Same full-bleed coastal wallpaper and optical frosted-glass bottom dock, paired with borderless monochrome top-right icons (`bare-icons`).
-- **`apple-tv.toml`** (*Apple TV*) — Full-bleed warm cinematic backdrop (`mars-horizon.svg`), bold top-left display title (`hero_title_position = "top-start"`), auto-hiding top bar, floating frosted-glass 5-card top-shelf dock with borderless focus lift, and row 2 peeking at the bottom edge.
-- **`google-tv.toml`** (*Google TV*) — Top-left pill navigation strip with solid white `Apps` pill, compact circular top-right buttons + `RustTV` wordmark (`top_bar_style = "google-tv"`), cinematic hero fade (`cinema-hero.svg`), `"Your apps"` section heading, and true circular app icons (`tile_aspect = "circle"`) with crisp white focus ring.
+- **`coastal-glass.toml`** (*Coastal Glass*) — Full-bleed coastal wallpaper (`coastal-cliff.svg`), top-left clean clock, borderless inline-label top-right controls (`inline-labels`), optical pre-baked frosted-glass floating bottom dock (`dock_blur = true`), unframed dock icons with labels inside (`dock-icon`), and frosted glass-pill focus (`glass-pill`).
+- **`coastal-minimal.toml`** (*Coastal Minimal*) — Same full-bleed coastal wallpaper and optical frosted-glass bottom dock, paired with borderless monochrome top-right icons (`bare-icons`).
+- **`cinema-shelf.toml`** (*Cinema Shelf*) — Full-bleed warm cinematic backdrop (`mars-horizon.svg`), bold top-left display title (`hero_title_position = "top-start"`), auto-hiding top bar, floating frosted-glass 5-card top-shelf dock with borderless focus lift, and row 2 peeking at the bottom edge.
+- **`spotlight-circles.toml`** (*Spotlight Circles*) — Top-left pill navigation strip with solid white `Apps` pill, compact circular top-right buttons + `RustTV` wordmark, cinematic hero fade (`cinema-hero.svg`), `"Your apps"` section heading, and true circular app icons (`tile_aspect = "circle"`) with crisp white focus ring.
 - **`ambient-pills.toml`** (*Ambient Pills*) — Deep near-black canvas lit by vivid app-colour ambient glow, top-left greeting + clock + vertical divider + uppercase date (`clock_position = "greeting-header"`), top-right stadium glass pills (`top_bar_style = "glass-pills"`), focused app title directly above a wide 4-column framed dock (`hero_title_position = "above-dock"`), and row 2 peeking at the bottom.
 - **`horizon-zen.toml`** (*Horizon Zen*) — Wallpaper-first minimalist zen screen with a vector SVG landscape backdrop (`horizon-backdrop.svg`), an ultra-light 116px centered hero clock, frosted floating bottom dock, unfocused tile dimming, underline focus, and translucent tinted overlays.
 - **`obsidian-blade.toml`** (*Obsidian Blade*) — Full-height edge-to-edge media-center navigation blade with electric cyan fill-highlights, wide live showcase preview, and consistent cyan accent selection across Settings and Quick Panels.
@@ -130,7 +130,7 @@ scrim_strength = 0.60        # 0.0..=0.90 directional contrast scrim over wallpa
 When you want **arbitrary shapes, custom layouts, custom vector `Path`s, and custom scripted behavior** (HTML + CSS + JS parity on native 60 fps Skia, enabled via the `skins` / `linux` feature), drop a folder into any `themes/` directory:
 
 ```text
-themes/google-tv-pro/
+themes/spotlight-pro/
 ├── skin.toml      # schema_version = 2, name, author, description, entry = "skin.slint", script = "skin.rhai"
 ├── skin.slint     # arbitrary Slint UI importing { RustTV } from "@rusttv/skin.slint"
 └── skin.rhai      # optional sandboxed Rhai script (on_init, on_focus, on_key, on_action, on_tick)
@@ -138,4 +138,7 @@ themes/google-tv-pro/
 
 - **UI (`skin.slint`)**: Compiled at runtime by `slint-interpreter` onto the exact same Skia OpenGL ES renderer. Imports `{ RustTV, SkinTile, SkinAction } from "@rusttv/skin.slint"` for live tiles, focus, clock/greeting/date, hero data, reactive script slots (`s0..s7`, `i0..i7`, `f0..f3`), and callbacks (`key`, `tile-clicked`, `action`).
 - **Scripting (`skin.rhai`)**: Runs in a strict sandbox (50,000 op budget per hook, 16-deep call stack, 4 KiB string cap, zero filesystem/network access) with host functions `set_str`/`get_str`, `set_int`/`get_int`, `set_float`/`get_float`, `tile_count`, `tile_id`, `tile_label`, `launch`, `focus`, `open_settings`, and `log`.
-- **Example**: [`themes/google-tv-pro/`](themes/google-tv-pro/) implements an interactive Google TV replica with live Rhai-driven tabs (`For you` / `Movies` / `Shows` / `Apps` / `Library`), dynamic spotlight taglines, and circular app icons.
+- **Examples**:
+  - [`themes/spotlight-pro/`](themes/spotlight-pro/) — standalone interactive pill-tab launcher with live Rhai tabs, spotlight subtitle, and circular app icons.
+  - [`themes/coastal-dock-pro/`](themes/coastal-dock-pro/) — standalone frosted wallpaper dock with unframed icons, glass-pill focus, and Rhai-togglable top bar.
+  - [`themes/ambient-pills-pro/`](themes/ambient-pills-pro/) — standalone radial-glow canvas with greeting + date header, stadium glass pills, and wide 4-column framed dock.

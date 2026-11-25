@@ -1,4 +1,4 @@
-// Level 3 programmable skin: Google TV replica (.slint + .rhai).
+// Level 3 programmable skin: Spotlight Pro (.slint + .rhai).
 // Rendered natively via Skia OpenGL ES at 60 fps through slint-interpreter.
 import { RustTV } from "@rusttv/skin.slint";
 
@@ -29,14 +29,15 @@ component TabPill inherits Rectangle {
 }
 
 export component SkinHome inherits Window {
-    title: "RustTV — Google TV Skin";
+    title: "RustTV — Spotlight Pro";
     background: #0E0F12;
     preferred-width: 1280px;
     preferred-height: 720px;
 
     property <length> u: min(root.width / 1920, root.height / 1080);
 
-    FocusScope {
+    keys := FocusScope {
+        init => { self.focus(); }
         key-pressed(event) => {
             RustTV.key(event.text, true, event.repeat) ? accept : reject
         }
@@ -51,7 +52,7 @@ export component SkinHome inherits Window {
         height: parent.height * 0.72;
         background: @radial-gradient(circle, RustTV.hero-color.with-alpha(0.65) 0%, #241828 45%, #0E0F12 100%);
     }
-    // Left + bottom Google TV legibility scrims.
+    // Left + bottom legibility scrims.
     Rectangle {
         width: parent.width;
         height: parent.height;

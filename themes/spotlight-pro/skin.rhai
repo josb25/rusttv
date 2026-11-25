@@ -1,5 +1,5 @@
 // Level 3 programmable skin script (sandboxed Rhai).
-// Drives interactive Google TV tabs, dynamic hero taglines, and shortcuts.
+// Drives interactive tabs, dynamic hero taglines, and shortcuts.
 
 fn tab_name(idx) {
     if idx == 0 { return "For you"; }

@@ -1,11 +1,11 @@
-# Reference skin: Apple TV / tvOS Dock
+# Reference theme: Cinema Shelf
 # Full-bleed cinematic top shelf backdrop with bold top-left display title,
 # floating warm frosted-glass dock holding 5 large rounded cards with borderless
 # focus lift, no tile labels, and row 2 peeking at the bottom edge.
 schema_version = 1
-name = "Apple TV"
+name = "Cinema Shelf"
 author = "RustTV"
-description = "tvOS-style cinematic backdrop with frosted 5-app top shelf dock and borderless lift"
+description = "Cinematic backdrop with frosted 5-app top shelf dock and borderless lift"
 
 [colors]
 bg = "#160A04"

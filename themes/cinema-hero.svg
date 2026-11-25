@@ -33,7 +33,7 @@
   <circle cx="940" cy="240" r="140" fill="#E85A4F" opacity="0.14"/>
   <circle cx="1090" cy="310" r="95" fill="#F4A261" opacity="0.12"/>
   <circle cx="790" cy="180" r="110" fill="#9B5DE5" opacity="0.10"/>
-  <!-- Google TV left + bottom legibility fades into #0E0F12 -->
+  <!-- Left + bottom legibility fades into #0E0F12 -->
   <rect width="1280" height="720" fill="url(#left-fade)"/>
   <rect width="1280" height="720" fill="url(#bottom-fade)"/>
 </svg>

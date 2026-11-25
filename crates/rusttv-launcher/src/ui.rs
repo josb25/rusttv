@@ -2208,7 +2208,11 @@ impl Controller {
         } else {
             (String::new(), String::new(), String::new())
         };
-        let should_show = self.home.state() == State::Browse && !self.away;
+        // Show the programmable skin whenever Home is in Browse mode and no
+        // external app is in front (note: `self.away` also flips true when
+        // HomeWindow yields Wayland focus to our own SkinHome window, so we
+        // gate on `front_app.is_none()` instead).
+        let should_show = self.home.state() == State::Browse && self.front_app.is_none();
         let focus_changed = self.skin_last_focus != Some(focus);
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
             skin.set_tiles(&skin_tiles);
@@ -7619,10 +7623,10 @@ mod tests {
         window.set_date_text("SATURDAY  17 OCTOBER".into());
 
         let skins = [
-            "projectivy-glass",
-            "projectivy-minimal",
-            "apple-tv",
-            "google-tv",
+            "coastal-glass",
+            "coastal-minimal",
+            "cinema-shelf",
+            "spotlight-circles",
             "ambient-pills",
         ];
         let mut buf = vec![slint::Rgb8Pixel::new(0, 0, 0); 1280 * 720];

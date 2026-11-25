@@ -1,11 +1,11 @@
-# Reference skin: Google TV
+# Reference theme: Spotlight Circles
 # Top-left pill navigation tabs with active solid white pill, compact circular
 # top-right icon buttons + RustTV wordmark, cinematic hero fading into #0E0F12,
 # "Your apps" section heading, and true circular app icons with white focus ring.
 schema_version = 1
-name = "Google TV"
+name = "Spotlight Circles"
 author = "RustTV"
-description = "Google TV pill tabs, cinematic hero fade, and circular Your apps row"
+description = "Pill tabs, cinematic hero fade, and circular Your apps row"
 
 [colors]
 bg = "#0E0F12"
