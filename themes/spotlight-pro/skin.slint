@@ -11,9 +11,9 @@ component TabPill inherits Rectangle {
     height: 44px;
     width: txt.preferred-width + 38px;
     border-radius: 22px;
-    background: focused ? #FFFFFF : (active ? #E8EAEDCC : transparent);
-    border-width: focused ? 2.5px : 0px;
-    border-color: #FFFFFF;
+    background: focused ? #FFFFFF : (active ? #FFFFFF22 : transparent);
+    border-width: focused ? 2.5px : (active ? 1px : 0px);
+    border-color: focused ? #FFFFFF : #FFFFFF44;
     animate background { duration: 150ms; easing: ease-out; }
 
     txt := Text {
@@ -22,7 +22,7 @@ component TabPill inherits Rectangle {
         text: label;
         font-size: 18px;
         font-weight: (active || focused) ? 600 : 500;
-        color: (active || focused) ? #121212 : #E8EAEDB8;
+        color: focused ? #121212 : (active ? #FFFFFF : #E8EAED99);
         horizontal-alignment: center;
         vertical-alignment: center;
     }

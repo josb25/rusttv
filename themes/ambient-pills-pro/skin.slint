@@ -168,17 +168,19 @@ export component SkinHome inherits Window {
         property <length> card-h: self.height - 2 * self.pad;
 
         for tile[i] in RustTV.tiles: Rectangle {
+            property <int> row-start: RustTV.i4 * 4;
+            property <int> slot: i - row-start;
             property <bool> is-focused: RustTV.i1 == 0 && i == RustTV.focused-index;
             property <float> sc: is-focused ? 1.04 : 1.0;
             width: parent.card-w * sc;
             height: parent.card-h * sc;
-            x: parent.pad + i * (parent.card-w + parent.gap) - (self.width - parent.card-w) / 2;
+            x: parent.pad + slot * (parent.card-w + parent.gap) - (self.width - parent.card-w) / 2;
             y: parent.pad - (self.height - parent.card-h) / 2;
             border-radius: 22 * u;
             background: tile.tint.alpha > 0 ? tile.tint : #141822;
             border-width: is-focused ? 4 * u : 0px;
             border-color: #FFFFFF;
-            visible: i < 4;
+            visible: i >= row-start && i < row-start + 4;
             animate width, height, x, y { duration: 150ms; easing: ease-out; }
 
             Rectangle {
@@ -197,7 +199,7 @@ export component SkinHome inherits Window {
         }
     }
 
-    // Row 2 peeking cleanly at the bottom edge.
+    // Next row peeking cleanly at the bottom edge.
     Rectangle {
         x: 114 * u;
         y: parent.height - 64 * u;
@@ -208,8 +210,9 @@ export component SkinHome inherits Window {
         property <length> card-w: (self.width - 3 * self.gap) / 4;
 
         for tile[i] in RustTV.tiles: Rectangle {
-            visible: i >= 4 && i < 8;
-            x: (i - 4) * (parent.card-w + parent.gap);
+            property <int> next-start: (RustTV.i4 + 1) * 4;
+            visible: i >= next-start && i < next-start + 4;
+            x: (i - next-start) * (parent.card-w + parent.gap);
             y: 0;
             width: parent.card-w;
             height: parent.height;
