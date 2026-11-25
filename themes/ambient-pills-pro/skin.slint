@@ -5,14 +5,15 @@ import { RustTV } from "@rusttv/skin.slint";
 component GlassPillButton inherits Rectangle {
     in property <string> label;
     in property <string> icon;
+    in property <bool> focused;
     callback clicked();
 
     height: 48px;
     width: row.preferred-width;
     border-radius: 24px;
-    background: #FFFFFF18;
-    border-width: 1.5px;
-    border-color: #FFFFFF48;
+    background: focused ? #FFFFFF : #FFFFFF18;
+    border-width: focused ? 2.5px : 1.5px;
+    border-color: focused ? #FFFFFF : #FFFFFF48;
 
     row := HorizontalLayout {
         padding-left: 18px;
@@ -28,7 +29,7 @@ component GlassPillButton inherits Rectangle {
                 viewbox-width: 24;
                 viewbox-height: 24;
                 commands: root.icon;
-                stroke: #FFFFFF;
+                stroke: root.focused ? #0C0E14 : #FFFFFF;
                 stroke-width: 2px;
                 fill: transparent;
             }
@@ -36,8 +37,8 @@ component GlassPillButton inherits Rectangle {
         Text {
             text: root.label;
             font-size: 18px;
-            font-weight: 500;
-            color: #FFFFFF;
+            font-weight: root.focused ? 600 : 500;
+            color: root.focused ? #0C0E14 : #FFFFFF;
             vertical-alignment: center;
         }
     }
@@ -131,6 +132,7 @@ export component SkinHome inherits Window {
 
         GlassPillButton {
             label: "Settings";
+            focused: RustTV.i1 == 1;
             icon: "M 19.18 9.51 L 21.77 9.86 L 21.77 14.14 L 19.18 14.49 L 18.84 15.32 L 20.42 17.39 L 17.39 20.42 L 15.32 18.84 L 14.49 19.18 L 14.14 21.77 L 9.86 21.77 L 9.51 19.18 L 8.68 18.84 L 6.61 20.42 L 3.58 17.39 L 5.16 15.32 L 4.82 14.49 L 2.23 14.14 L 2.23 9.86 L 4.82 9.51 L 5.16 8.68 L 3.58 6.61 L 6.61 3.58 L 8.68 5.16 L 9.51 4.82 L 9.86 2.23 L 14.14 2.23 L 14.49 4.82 L 15.32 5.16 L 17.39 3.58 L 20.42 6.61 L 18.84 8.68 Z M 15.2 12 A 3.2 3.2 0 1 0 8.8 12 A 3.2 3.2 0 1 0 15.2 12 Z";
             clicked => { RustTV.action("settings", ""); }
         }
@@ -165,7 +167,7 @@ export component SkinHome inherits Window {
         property <length> card-h: self.height - 2 * self.pad;
 
         for tile[i] in RustTV.tiles: Rectangle {
-            property <bool> is-focused: i == RustTV.focused-index;
+            property <bool> is-focused: RustTV.i1 == 0 && i == RustTV.focused-index;
             property <float> sc: is-focused ? 1.04 : 1.0;
             width: parent.card-w * sc;
             height: parent.card-h * sc;

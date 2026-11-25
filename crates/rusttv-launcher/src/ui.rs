@@ -2122,8 +2122,18 @@ impl Controller {
 
     #[cfg(feature = "skins")]
     fn skin_key(&mut self, text: &str, pressed: bool, repeat: bool) -> bool {
+        let key_name = match text {
+            "\u{F700}" => "Up",
+            "\u{F701}" => "Down",
+            "\u{F702}" => "Left",
+            "\u{F703}" => "Right",
+            "\n" | "\r" => "Ok",
+            "\u{F748}" | "\u{1b}" | "\u{8}" => "Back",
+            "\u{F735}" => "Menu",
+            other => other,
+        };
         let (handled, cmds) = if let Some(skin) = self.active_skin.as_mut() {
-            skin.dispatch_key(text, pressed)
+            skin.dispatch_key(key_name, pressed)
         } else {
             (false, Vec::new())
         };
@@ -2208,11 +2218,12 @@ impl Controller {
         } else {
             (String::new(), String::new(), String::new())
         };
-        // Show the programmable skin whenever Home is in Browse mode and no
-        // external app is in front (note: `self.away` also flips true when
-        // HomeWindow yields Wayland focus to our own SkinHome window, so we
-        // gate on `front_app.is_none()` instead).
-        let should_show = self.home.state() == State::Browse && self.front_app.is_none();
+        // Show the programmable skin whenever Home is on the main screen
+        // (Browse or Top bar) and no external app is in front (note: `self.away`
+        // also flips true when HomeWindow yields Wayland focus to our own
+        // SkinHome window, so we gate on `front_app.is_none()` instead).
+        let should_show =
+            matches!(self.home.state(), State::Browse | State::Bar) && self.front_app.is_none();
         let focus_changed = self.skin_last_focus != Some(focus);
         let cmds = if let Some(skin) = self.active_skin.as_mut() {
             skin.set_tiles(&skin_tiles);

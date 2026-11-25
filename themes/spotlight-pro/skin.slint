@@ -5,12 +5,15 @@ import { RustTV } from "@rusttv/skin.slint";
 component TabPill inherits Rectangle {
     in property <string> label;
     in property <bool> active;
+    in property <bool> focused;
     callback clicked();
 
     height: 44px;
     width: txt.preferred-width + 38px;
     border-radius: 22px;
-    background: active ? #E8EAED : transparent;
+    background: focused ? #FFFFFF : (active ? #E8EAEDCC : transparent);
+    border-width: focused ? 2.5px : 0px;
+    border-color: #FFFFFF;
     animate background { duration: 150ms; easing: ease-out; }
 
     txt := Text {
@@ -18,8 +21,8 @@ component TabPill inherits Rectangle {
         height: parent.height;
         text: label;
         font-size: 18px;
-        font-weight: active ? 600 : 500;
-        color: active ? #121212 : #E8EAEDB8;
+        font-weight: (active || focused) ? 600 : 500;
+        color: (active || focused) ? #121212 : #E8EAEDB8;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -91,11 +94,11 @@ export component SkinHome inherits Window {
                 fill: transparent;
             }
         }
-        TabPill { label: "For you"; active: RustTV.i0 == 0; clicked => { RustTV.action("tab", "0"); } }
-        TabPill { label: "Movies"; active: RustTV.i0 == 1; clicked => { RustTV.action("tab", "1"); } }
-        TabPill { label: "Shows"; active: RustTV.i0 == 2; clicked => { RustTV.action("tab", "2"); } }
-        TabPill { label: "Apps"; active: RustTV.i0 == 3; clicked => { RustTV.action("tab", "3"); } }
-        TabPill { label: "Library"; active: RustTV.i0 == 4; clicked => { RustTV.action("tab", "4"); } }
+        TabPill { label: "For you"; active: RustTV.i0 == 0; focused: RustTV.i1 == 1 && RustTV.i2 == 0; clicked => { RustTV.action("tab", "0"); } }
+        TabPill { label: "Movies"; active: RustTV.i0 == 1; focused: RustTV.i1 == 1 && RustTV.i2 == 1; clicked => { RustTV.action("tab", "1"); } }
+        TabPill { label: "Shows"; active: RustTV.i0 == 2; focused: RustTV.i1 == 1 && RustTV.i2 == 2; clicked => { RustTV.action("tab", "2"); } }
+        TabPill { label: "Apps"; active: RustTV.i0 == 3; focused: RustTV.i1 == 1 && RustTV.i2 == 3; clicked => { RustTV.action("tab", "3"); } }
+        TabPill { label: "Library"; active: RustTV.i0 == 4; focused: RustTV.i1 == 1 && RustTV.i2 == 4; clicked => { RustTV.action("tab", "4"); } }
     }
 
     // Top-right circular Settings button + clock + RustTV wordmark.
@@ -107,10 +110,13 @@ export component SkinHome inherits Window {
         alignment: end;
 
         Rectangle {
+            property <bool> is-focused: RustTV.i1 == 1 && RustTV.i2 == 5;
             width: 44px;
             height: 44px;
             border-radius: 22px;
-            background: #FFFFFF1E;
+            background: is-focused ? #FFFFFF : #FFFFFF1E;
+            border-width: is-focused ? 2.5px : 0px;
+            border-color: #FFFFFF;
             Path {
                 x: 11px;
                 y: 11px;
@@ -119,7 +125,7 @@ export component SkinHome inherits Window {
                 viewbox-width: 24;
                 viewbox-height: 24;
                 commands: "M 19.18 9.51 L 21.77 9.86 L 21.77 14.14 L 19.18 14.49 L 18.84 15.32 L 20.42 17.39 L 17.39 20.42 L 15.32 18.84 L 14.49 19.18 L 14.14 21.77 L 9.86 21.77 L 9.51 19.18 L 8.68 18.84 L 6.61 20.42 L 3.58 17.39 L 5.16 15.32 L 4.82 14.49 L 2.23 14.14 L 2.23 9.86 L 4.82 9.51 L 5.16 8.68 L 3.58 6.61 L 6.61 3.58 L 8.68 5.16 L 9.51 4.82 L 9.86 2.23 L 14.14 2.23 L 14.49 4.82 L 15.32 5.16 L 17.39 3.58 L 20.42 6.61 L 18.84 8.68 Z M 15.2 12 A 3.2 3.2 0 1 0 8.8 12 A 3.2 3.2 0 1 0 15.2 12 Z";
-                stroke: #F2F4F8;
+                stroke: parent.is-focused ? #121212 : #F2F4F8;
                 stroke-width: 1.8px;
                 fill: transparent;
             }
@@ -183,7 +189,7 @@ export component SkinHome inherits Window {
         height: 168 * u;
 
         for tile[i] in RustTV.tiles: Rectangle {
-            property <bool> is-focused: i == RustTV.focused-index;
+            property <bool> is-focused: RustTV.i1 == 0 && i == RustTV.focused-index;
             property <length> base-size: 146 * u;
             property <length> step: 174 * u;
             property <length> sz: is-focused ? base-size * 1.10 : base-size;

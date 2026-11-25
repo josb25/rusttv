@@ -192,6 +192,7 @@ impl SkinScript {
         let mut engine = rhai::Engine::new();
         engine.set_max_operations(MAX_SCRIPT_OPS);
         engine.set_max_call_levels(MAX_SCRIPT_CALL_DEPTH);
+        engine.set_max_expr_depths(64, 32);
         engine.set_max_string_size(MAX_SCRIPT_STRING);
         engine.set_max_array_size(MAX_SCRIPT_COLLECTION);
         engine.set_max_map_size(MAX_SCRIPT_COLLECTION);
