@@ -196,4 +196,76 @@ export component SkinHome inherits Window {
             }
         }
     }
+
+    // Launch splash: covers Home while the app starts, until its window takes over.
+    splash := Rectangle {
+        property <bool> shown: RustTV.mode == 2;
+        property <int> app: max(0, RustTV.focused-index);
+        property <bool> has-app: self.app < RustTV.tiles.length;
+        property <bool> has-cover: self.has-app && (RustTV.tiles[self.app].kind == 0 || RustTV.tiles[self.app].kind == 5 || RustTV.tiles[self.app].kind == 6 || (RustTV.tiles[self.app].image.width > 0 && RustTV.tiles[self.app].kind != 1));
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        background: #0E1A24;
+        opacity: self.shown ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: RustTV.reduced-effects ? 0ms : self.shown ? 250ms : 150ms; delay: self.shown && !RustTV.reduced-effects ? 150ms : 0ms; easing: ease-out; }
+
+        if splash.has-app: Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: 300 * u;
+            width: 500 * u;
+            height: 282 * u;
+            border-radius: 26 * u;
+            clip: true;
+            background: RustTV.tiles[splash.app].tint.alpha > 0 ? RustTV.tiles[splash.app].tint : #182834;
+            if splash.has-cover: Image {
+                width: parent.width;
+                height: parent.height;
+                source: RustTV.tiles[splash.app].image;
+                image-fit: cover;
+            }
+            if RustTV.tiles[splash.app].kind == 1: Image {
+                x: (parent.width - self.width) / 2;
+                y: parent.height * 0.15;
+                width: 144 * u;
+                height: 144 * u;
+                source: RustTV.tiles[splash.app].image;
+                image-fit: contain;
+            }
+            if RustTV.tiles[splash.app].kind == 1 || !splash.has-cover: Text {
+                y: RustTV.tiles[splash.app].kind == 1 ? parent.height * 0.15 + 160 * u : 0;
+                width: parent.width;
+                height: RustTV.tiles[splash.app].kind == 1 ? 64 * u : parent.height;
+                text: RustTV.tiles[splash.app].label;
+                font-size: 46 * u;
+                color: #FFFFFF;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        if splash.has-app && RustTV.tiles[splash.app].kind != 1 && RustTV.tiles[splash.app].kind != 2: Text {
+            x: 0;
+            y: 630 * u;
+            width: parent.width;
+            text: RustTV.tiles[splash.app].label;
+            font-size: 41 * u;
+            font-weight: 500;
+            color: #FFFFFF;
+            horizontal-alignment: center;
+            overflow: elide;
+        }
+        for k in 3: Rectangle {
+            property <float> phase: splash.visible ? mod(animation-tick() / 1200ms + k * 0.2, 1) : 0;
+            x: (parent.width - 3 * 18 * u - 2 * 22 * u) / 2 + k * 40 * u;
+            y: 740 * u;
+            width: 18 * u;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: #F6F1E7;
+            opacity: 0.25 + 0.75 * max(0, sin(self.phase * 360deg));
+        }
+    }
 }
