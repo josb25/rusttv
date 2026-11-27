@@ -236,6 +236,7 @@ fn run(font: FontVec) -> Result<(), String> {
         surface: None,
         prompt: TextPrompt::new("", false),
         pointer_at: None,
+        pointer_down: false,
         echoes: 0,
         pointer: None,
     };
@@ -291,6 +292,8 @@ struct State {
     prompt: TextPrompt,
     /// Where the pointer is over the keyboard, if it is.
     pointer_at: Option<(f64, f64)>,
+    /// Whether the left pointer button was pressed while over the keyboard.
+    pointer_down: bool,
     /// Backspaces sent through the virtual keyboard that may still come
     /// back through the grab (compositors that don't pass the input
     /// method's own keys around it); ignored, so they don't delete again.
@@ -309,6 +312,8 @@ impl State {
         self.passing = false;
         self.waiting = false;
         self.ok_pressed = false;
+        self.pointer_at = None;
+        self.pointer_down = false;
         SHOWN.store(true, Ordering::Relaxed);
         if self.grab.is_none() {
             self.grab = Some(self.input_method.grab_keyboard(qh, ()));
@@ -351,6 +356,8 @@ impl State {
         SHOWN.store(false, Ordering::Relaxed);
         self.waiting = false;
         self.ok_pressed = false;
+        self.pointer_at = None;
+        self.pointer_down = false;
         self.echoes = 0;
         if let Some(grab) = self.grab.take() {
             grab.release();
@@ -660,9 +667,13 @@ impl Dispatch<WlPointer, ()> for State {
                     state.hover(surface_x, surface_y, qh);
                 } else {
                     state.pointer_at = None;
+                    state.pointer_down = false;
                 }
             }
-            wl_pointer::Event::Leave { .. } => state.pointer_at = None,
+            wl_pointer::Event::Leave { .. } => {
+                state.pointer_at = None;
+                state.pointer_down = false;
+            }
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
@@ -673,11 +684,22 @@ impl Dispatch<WlPointer, ()> for State {
                 }
             }
             wl_pointer::Event::Button {
+                button: BTN_LEFT,
+                state: WEnum::Value(wl_pointer::ButtonState::Pressed),
+                ..
+            } => {
+                state.pointer_down = state.pointer_at.is_some();
+            }
+            wl_pointer::Event::Button {
                 time,
                 button: BTN_LEFT,
                 state: WEnum::Value(wl_pointer::ButtonState::Released),
                 ..
-            } => state.click(time, qh),
+            } => {
+                if std::mem::take(&mut state.pointer_down) {
+                    state.click(time, qh);
+                }
+            }
             _ => {}
         }
     }
