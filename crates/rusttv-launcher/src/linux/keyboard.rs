@@ -17,8 +17,10 @@ use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::{AsFd as _, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use ab_glyph::FontVec;
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
     wl_buffer::{self, WlBuffer},
@@ -239,13 +241,46 @@ fn run(font: FontVec) -> Result<(), String> {
         pointer_down: false,
         echoes: 0,
         pointer: None,
+        pending_hide: None,
     };
     log::info!("on-screen keyboard for apps ready");
     let mut state = state;
     loop {
         queue
-            .blocking_dispatch(&mut state)
+            .dispatch_pending(&mut state)
             .map_err(|error| error.to_string())?;
+        if let Some(deadline) = state.pending_hide
+            && Instant::now() >= deadline
+        {
+            state.pending_hide = None;
+            state.active = false;
+            state.hide();
+        }
+        connection.flush().map_err(|error| error.to_string())?;
+        if let Some(guard) = queue.prepare_read() {
+            let timeout = state.pending_hide.map(|deadline| {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                Timespec {
+                    tv_sec: rem.as_secs() as i64,
+                    tv_nsec: i64::from(rem.subsec_nanos()),
+                }
+            });
+            let mut fds = [PollFd::new(&connection, PollFlags::IN)];
+            match poll(&mut fds, timeout.as_ref()) {
+                Ok(0) => drop(guard),
+                Ok(_) => {
+                    if let Err(error) = guard.read() {
+                        match error {
+                            wayland_client::backend::WaylandError::Io(ref io)
+                                if io.kind() == std::io::ErrorKind::WouldBlock => {}
+                            other => return Err(other.to_string()),
+                        }
+                    }
+                }
+                Err(rustix::io::Errno::INTR) => drop(guard),
+                Err(error) => return Err(error.to_string()),
+            }
+        }
     }
 }
 
@@ -303,10 +338,16 @@ struct State {
     /// often connects after the launcher started, and a pointer asked for
     /// before that never gets events.
     pointer: Option<WlPointer>,
+    /// Debounce deadline for `Deactivate`: toolkits like winit/Slint briefly
+    /// toggle text-input disable+enable on IME updates. Waiting 120ms before
+    /// tearing down the surface and grab prevents OSK flicker and leaked Enter
+    /// key presses.
+    pending_hide: Option<Instant>,
 }
 
 impl State {
     fn show(&mut self, qh: &QueueHandle<Self>) {
+        self.pending_hide = None;
         let (title, secret) = title(self.purpose);
         self.prompt = TextPrompt::new(title, secret);
         self.passing = false;
@@ -353,6 +394,7 @@ impl State {
     }
 
     fn hide(&mut self) {
+        self.pending_hide = None;
         SHOWN.store(false, Ordering::Relaxed);
         self.waiting = false;
         self.ok_pressed = false;
@@ -492,19 +534,27 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
             } => state.pending_purpose = u32::from(purpose),
             input_method::Event::Done => {
                 state.serial = state.serial.wrapping_add(1);
+                let prev_purpose = state.purpose;
                 state.purpose = state.pending_purpose;
                 match state.pending_active.take() {
                     Some(true) => {
+                        state.pending_hide = None;
                         state.active = true;
-                        if FRESH.swap(false, Ordering::Relaxed) {
+                        if state.surface.is_some() && state.purpose == prev_purpose {
+                            // Already visible for the same field; keep focus and key state.
+                        } else if FRESH.swap(false, Ordering::Relaxed) {
                             state.wait(qh);
                         } else {
                             state.show(qh);
                         }
                     }
                     Some(false) => {
-                        state.active = false;
-                        state.hide();
+                        if state.surface.is_some() {
+                            state.pending_hide = Some(Instant::now() + Duration::from_millis(120));
+                        } else {
+                            state.active = false;
+                            state.hide();
+                        }
                     }
                     None => {}
                 }
