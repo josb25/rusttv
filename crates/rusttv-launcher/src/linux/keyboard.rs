@@ -139,7 +139,7 @@ fn key(prompt: &mut TextPrompt, key: u32, pressed: bool) -> Effect {
             prompt.delete();
             return Effect::Delete;
         }
-        (code::ENTER | code::KP_ENTER | code::SELECT, false) => Input::OkReleased,
+        (k, false) if code::is_ok(k) => Input::OkReleased,
         (key, true) if code::types(key) => return Effect::Pass,
         _ => return Effect::Redraw(false),
     };
@@ -231,6 +231,7 @@ fn run(font: FontVec) -> Result<(), String> {
         passing: false,
         waiting: false,
         swallow: None,
+        ok_pressed: false,
         modifiers: [0; 4],
         surface: None,
         prompt: TextPrompt::new("", false),
@@ -280,6 +281,10 @@ struct State {
     waiting: bool,
     /// The OK that brought the keyboard up: its release is no key press.
     swallow: Option<u32>,
+    /// Whether an OK key was pressed while the keyboard was already visible.
+    /// Prevents a stray OK release (from the key press that opened the text
+    /// field) from auto-typing the default focused key (`q`).
+    ok_pressed: bool,
     /// The grab's modifiers: depressed, latched, locked, group.
     modifiers: [u32; 4],
     surface: Option<Surface>,
@@ -303,6 +308,7 @@ impl State {
         self.prompt = TextPrompt::new(title, secret);
         self.passing = false;
         self.waiting = false;
+        self.ok_pressed = false;
         SHOWN.store(true, Ordering::Relaxed);
         if self.grab.is_none() {
             self.grab = Some(self.input_method.grab_keyboard(qh, ()));
@@ -344,6 +350,7 @@ impl State {
     fn hide(&mut self) {
         SHOWN.store(false, Ordering::Relaxed);
         self.waiting = false;
+        self.ok_pressed = false;
         self.echoes = 0;
         if let Some(grab) = self.grab.take() {
             grab.release();
@@ -574,6 +581,15 @@ impl Dispatch<ZwpInputMethodKeyboardGrabV2, ()> for State {
                         state.echoes -= 1;
                     }
                     return;
+                }
+                if code::is_ok(pressed_key) {
+                    if pressed {
+                        state.ok_pressed = true;
+                        return;
+                    }
+                    if !std::mem::take(&mut state.ok_pressed) {
+                        return;
+                    }
                 }
                 let effect = key(&mut state.prompt, pressed_key, pressed);
                 state.apply(effect, time, pressed_key, qh);
