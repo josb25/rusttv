@@ -16,7 +16,8 @@ mod layout;
 use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::{AsFd as _, OwnedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use ab_glyph::FontVec;
@@ -87,9 +88,24 @@ mod code {
 /// Whether the keyboard is on screen (game controllers steer it then).
 static SHOWN: AtomicBool = AtomicBool::new(false);
 
-/// An app window came to the front (or got the keys back from the app
-/// overlay), and no text field took the focus since.
-static FRESH: AtomicBool = AtomicBool::new(false);
+/// Monotonic timestamp (ms since first call, >= 1) of the last window switch,
+/// or 0 once consumed. Only activations within 1.5s of switching are treated
+/// as app-initiated auto-focus (e.g. Dolphin's location bar); later clicks on
+/// a search box open the keyboard right away.
+static FRESH_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let start = EPOCH.get_or_init(Instant::now);
+    u64::try_from(start.elapsed().as_millis())
+        .unwrap_or(u64::MAX)
+        .saturating_add(1)
+}
+
+fn take_fresh() -> bool {
+    let prev = FRESH_MS.swap(0, Ordering::Relaxed);
+    prev > 0 && now_ms().saturating_sub(prev) <= 1500
+}
 
 /// An app window came to the front, or the app overlay gave the keys back
 /// to the app. A text field that has the focus as the app comes up (Dolphin
@@ -97,7 +113,7 @@ static FRESH: AtomicBool = AtomicBool::new(false);
 /// person: the keyboard waits for OK on it. Moving to a field brings the
 /// keyboard up as ever.
 pub fn window_switched() {
-    FRESH.store(true, Ordering::Relaxed);
+    FRESH_MS.store(now_ms(), Ordering::Relaxed);
 }
 
 /// Whether the on-screen keyboard is showing.
@@ -542,7 +558,7 @@ impl Dispatch<ZwpInputMethodV2, ()> for State {
                         state.active = true;
                         if state.surface.is_some() && state.purpose == prev_purpose {
                             // Already visible for the same field; keep focus and key state.
-                        } else if FRESH.swap(false, Ordering::Relaxed) {
+                        } else if take_fresh() {
                             state.wait(qh);
                         } else {
                             state.show(qh);
